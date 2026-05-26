@@ -4,7 +4,7 @@ This project implements a topic-driven multi-agent RGB-D pipeline for two synchr
 
 ## High-Level Goal
 
-The goal is to produce two camera-local 3D reconstructions in a shared coordinate system, with RTAB-Map providing the local maps and NVBlox providing per-camera volumetric reconstructions. The extrinsic solver supplies the TF link between the cameras, but there is no dedicated node that merges RTAB-Map and NVBlox into a single fused map in the current implementation. The pipeline is structured around five stages:
+The goal is to produce a single fused 3D map in a shared coordinate system. RTAB-Map still runs for local SLAM and can expose camera-local maps as optional diagnostic outputs, while NVBlox performs the volumetric fusion in the common frame. The extrinsic solver supplies the TF link between the cameras. The pipeline is structured around five stages:
 
 1. Depth pre-processing
 2. Semantic masking
@@ -23,23 +23,25 @@ flowchart LR
     B1 --> C1["Head semantic masker<br/>YOLOv8-style segmentation"]
     A1 --> C1
     C1 --> D1["Head RTAB-Map<br/>local RGB-D SLAM"]
-    C1 --> E1["Head NVBlox<br/>per-camera TSDF"]
-
     A3[Exo RGB topic] --> B2["Exo depth preprocessor<br/>spatial + temporal filtering"]
     A4[Exo depth topic] --> B2
     B2 --> C2["Exo semantic masker<br/>YOLOv8-style segmentation"]
     A3 --> C2
     C2 --> D2["Exo RTAB-Map<br/>local RGB-D SLAM"]
-    C2 --> E2["Exo NVBlox<br/>per-camera TSDF"]
 
     C1 --> F["Extrinsic solver<br/>ORB or LightGlue + RANSAC"]
     C2 --> F
     F --> G["TF head -> exo<br/>SE(3) transform"]
     D1 --> H["Local head map"]
     D2 --> I["Local exo map"]
-    E1 --> J["Head TSDF/mesh<br/>volumetric integration"]
-    E2 --> K["Exo TSDF/mesh<br/>volumetric integration"]
+    C1 --> MUX["depth_mux republisher<br/>merge topics & correct frames"]
+    C2 --> MUX
+    MUX --> N["Single NVBlox node<br/>TSDF fusion in common frame"]
+    N --> J["Fused TSDF/mesh<br/>single global map"]
 ```
+
+Note: the `extrinsic_solver` remains running in this design and publishes the TF used by the unified `nvblox_node` to correctly place each camera frame into the common fusion frame.
+The RTAB-Map local maps are optional diagnostic outputs and are not required for the final fused map.
 
 ## 1. Depth Pre-Processing
 

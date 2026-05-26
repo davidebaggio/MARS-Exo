@@ -11,6 +11,9 @@ cleanup() {
 	if [[ -n "${PIPELINE_PID:-}" ]] && kill -0 "$PIPELINE_PID" 2>/dev/null; then
 		kill "$PIPELINE_PID" || true
 	fi
+	if [[ -n "${RVIZ_PID:-}" ]] && kill -0 "$RVIZ_PID" 2>/dev/null; then
+		kill "$RVIZ_PID" || true
+	fi
 	pkill -f '/home/baggio/master_thesis/exo_head_slam/install/exo_head_slam/lib/exo_head_slam/(semantic_masker|extrinsic_solver)' || true
 }
 
@@ -40,13 +43,17 @@ if [ -d "install/exo_head_slam/lib/exo_head_slam" ]; then
     sed -i "1s|^#!.*python.*|#!$(which python3)|" install/exo_head_slam/lib/exo_head_slam/*
 fi
 
-ros2 launch exo_head_slam main_pipeline_launch.py &
+ros2 launch exo_head_slam main_pipeline_launch.py use_sim_time:=true &
 PIPELINE_PID=$!
 
 wait_for_pipeline
 
 echo "Starting bag playback: $BAG_PATH"
-ros2 bag play -i "$BAG_PATH" mcap --loop --rate 0.1 --disable-keyboard-controls > /tmp/exo_head_slam_bag.log 2>&1 &
+ros2 bag play -i "$BAG_PATH" mcap --loop --rate 0.1 --disable-keyboard-controls --clock > /tmp/exo_head_slam_bag.log 2>&1 &
 BAG_PID=$!
+
+# Launch RViz with pre-configured displays
+rviz2 -d "$(ros2 pkg prefix exo_head_slam)/share/exo_head_slam/rviz/pipeline.rviz" --ros-args -p use_sim_time:=true &
+RVIZ_PID=$!
 
 wait "$PIPELINE_PID"

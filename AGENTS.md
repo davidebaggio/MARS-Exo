@@ -1,0 +1,64 @@
+# AGENTS.md
+
+## Project
+
+ROS 2 ament_python package — multi-agent RGB-D SLAM pipeline for head + exoskeleton cameras. Master thesis project. No tests, no CI.
+
+## Build & Run
+
+```bash
+colcon build --packages-select exo_head_slam --symlink-install
+source install/setup.bash
+```
+
+**Or use `run.sh`** — builds, sources, launches the pipeline, and plays a rosbag at 0.1x loop. Accepts an optional bag path argument.
+
+### Critical: Python shebang fix
+
+After `colcon build`, the generated shim scripts in `install/exo_head_slam/lib/exo_head_slam/` hardcode `#!/usr/bin/python3`. If using a conda or venv, rewrite the shebangs to `$(which python3)` or nodes will run in the system Python and miss dependencies. `run.sh` does this automatically.
+
+## Nodes (entry points in setup.py)
+
+| Executable | Source | Purpose |
+|---|---|---|
+| `depth_preprocessor` | `depth_preprocessor_node.py` | Spatial + temporal depth filtering |
+| `semantic_masker` | `semantic_masker_node.py` | YOLOv8-seg dynamic object removal |
+| `extrinsic_solver` | `extrinsic_solver_node.py` | 3D-to-3D SE(3) calibration (ORB or LightGlue) |
+| `depth_mux` | `depth_mux_node.py` | Merges head+exo streams onto single merged topics for NVBlox |
+
+## Launch
+
+- **`launch/main_pipeline_launch.py`** — top-level entry point. Starts all 4 custom nodes + static TF publishers.
+- RTAB-Map and NVBlox are **optional** — the launch file checks if `rtabmap_slam` / `nvblox_ros` packages exist and skips them silently if not found.
+
+## Configuration
+
+All runtime parameters live in YAML, not in code:
+- `config/head.yaml` — head camera pipeline
+- `config/exo.yaml` — exo camera pipeline
+- `config/common.yaml` — extrinsic solver params (matcher_type, etc.)
+
+Changing topics, filter params, or matcher type requires only YAML edits.
+
+## Optional Dependencies
+
+- `ultralytics>=8.0` (requirements.txt) — semantic masker falls back to empty mask if missing
+- `lightglue` + `superpoint` — extrinsic solver falls back to ORB if missing
+- `rtabmap_slam` ROS 2 package — per-camera SLAM, optional
+- `nvblox_ros` ROS 2 package — volumetric fusion, optional
+
+## Pipeline Data Flow
+
+```
+RGB + depth → depth_preprocessor → semantic_masker → rtabmap (optional)
+                                                ↘    nvblox (optional)
+semantic_masker (head+exo) → extrinsic_solver → TF head↔exo
+semantic_masker (head+exo) → depth_mux → merged topics → nvblox
+```
+
+## Gotchas
+
+- `build/`, `install/`, `log/` are colcon artifacts, gitignored
+- `*.pt` and `*.engine` model files are gitignored — `yolov8n-seg.pt` must be placed in repo root manually
+- Bag playback defaults to `$HOME/master_thesis/SLAM3R/data/exo/rosbag2_2026_05_06-16_48_23/rosbag2_2026_05_06-16_48_23_0.mcap`
+- RGB and depth must already be published and aligned by an upstream camera stack; this package does not capture or align them

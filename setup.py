@@ -14,6 +14,7 @@ setup(
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'launch'), glob(os.path.join('launch', '*_launch.py'))),
         (os.path.join('share', package_name, 'config'), glob(os.path.join('config', '*.yaml'))),
+        (os.path.join('share', package_name, 'rviz'), glob(os.path.join('rviz', '*.rviz'))),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -27,6 +28,7 @@ setup(
             'depth_preprocessor = exo_head_slam.depth_preprocessor_node:main',
             'semantic_masker = exo_head_slam.semantic_masker_node:main',
             'extrinsic_solver = exo_head_slam.extrinsic_solver_node:main',
+            'depth_mux = exo_head_slam.depth_mux_node:main',
         ],
     },
 )

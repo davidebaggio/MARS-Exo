@@ -5,6 +5,8 @@ import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch_ros.actions import Node
+from launch.substitutions import LaunchConfiguration
+from launch.actions import DeclareLaunchArgument
 
 
 def load_section(config_path: str, section: str) -> dict:
@@ -17,6 +19,13 @@ def generate_launch_description():
     Launches RTAB-Map instances for both head and exoskeleton.
     Assumes rtabmap_ros is installed.
     """
+    use_sim_time_arg = DeclareLaunchArgument(
+        'use_sim_time',
+        default_value='false',
+        description='Use simulation time if true'
+    )
+    use_sim_time = LaunchConfiguration('use_sim_time')
+
     config_dir = os.path.join(get_package_share_directory('exo_head_slam'), 'config')
     config_path = os.path.join(config_dir, 'head.yaml')
     exo_config_path = os.path.join(config_dir, 'exo.yaml')
@@ -28,12 +37,14 @@ def generate_launch_description():
         'frame_id': head_params['frame_id'],
         'approx_sync': head_params['approx_sync'],
         'wait_for_transform': head_params['wait_for_transform'],
+        'use_sim_time': use_sim_time,
     }
     exo_runtime_params = {
         'subscribe_depth': exo_params['subscribe_depth'],
         'frame_id': exo_params['frame_id'],
         'approx_sync': exo_params['approx_sync'],
         'wait_for_transform': exo_params['wait_for_transform'],
+        'use_sim_time': use_sim_time,
     }
 
     head_rtabmap = Node(
@@ -65,6 +76,7 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        use_sim_time_arg,
         head_rtabmap,
         exo_rtabmap
     ])
