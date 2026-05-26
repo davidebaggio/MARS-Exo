@@ -1,0 +1,40 @@
+head_depth_preprocessor:
+  ros__parameters:
+    input_depth_topic: "/camera/head/aligned_depth_to_color/image_raw"
+    output_depth_topic: "/head/filtered/depth_raw"
+    depth_filter.enabled: true
+    depth_filter.depth_unit_scale: 0.001
+    depth_filter.spatial.kernel_size: 5
+    depth_filter.spatial.sigma_color: 0.08
+    depth_filter.spatial.sigma_space: 3.0
+    depth_filter.temporal.enabled: true
+    depth_filter.temporal.alpha: 0.6
+
+head_semantic_masker:
+  ros__parameters:
+    input_rgb_topic: "/camera/head/color/image_raw"
+    input_depth_topic: "/head/filtered/depth_raw"
+    output_rgb_topic: "/head/masked/image_raw"
+    output_depth_topic: "/head/masked/depth_raw"
+    masker.model_path: "yolov8n-seg.pt"
+    masker.conf_threshold: 0.25
+    masker.dynamic_classes: [0, 1, 2, 3, 5, 7]
+
+head_rtabmap:
+  ros__parameters:
+    subscribe_depth: true
+    frame_id: "head_camera_link"
+    approx_sync: true
+    wait_for_transform: 0.2
+    rgb_topic: "/head/masked/image_raw"
+    depth_topic: "/head/masked/depth_raw"
+    camera_info_topic: "/camera/head/color/camera_info"
+
+head_nvblox:
+  ros__parameters:
+    global_frame: "head_camera_link"
+    use_depth: true
+    use_color: true
+    depth_topic: "/head/masked/depth_raw"
+    color_topic: "/head/masked/image_raw"
+    camera_info_topic: "/camera/head/color/camera_info"

@@ -1,0 +1,14 @@
+extrinsic_solver:
+  ros__parameters:
+    matcher_type: "lightglue"
+    lightglue_device: "cuda"
+    lightglue_max_keypoints: 2048
+    head_rgb_topic: "/head/masked/image_raw"
+    head_depth_topic: "/head/masked/depth_raw"
+    exo_rgb_topic: "/exo/masked/image_raw"
+    exo_depth_topic: "/exo/masked/depth_raw"
+    head_camera_info_topic: "/camera/head/color/camera_info"
+    exo_camera_info_topic: "/camera/exo/color/camera_info"
+    head_frame_id: "head_camera_link"
+    exo_frame_id: "exo_camera_link"
+    min_3d_matches: 15
