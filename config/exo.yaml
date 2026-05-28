@@ -20,21 +20,7 @@ exo_semantic_masker:
     masker.conf_threshold: 0.25
     masker.dynamic_classes: [0, 1, 2, 3, 5, 7]
 
-exo_rtabmap:
-  ros__parameters:
-    subscribe_depth: true
-    frame_id: "exo_camera_link"
-    approx_sync: true
-    wait_for_transform: 0.2
-    rgb_topic: "/exo/masked/image_raw"
-    depth_topic: "/exo/masked/depth_raw"
-    camera_info_topic: "/camera/exo/color/camera_info"
-
 exo_nvblox:
   ros__parameters:
-    global_frame: "exo_camera_link"
-    use_depth: true
-    use_color: true
     depth_topic: "/exo/masked/depth_raw"
-    color_topic: "/exo/masked/image_raw"
     camera_info_topic: "/camera/exo/color/camera_info"

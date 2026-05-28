@@ -24,12 +24,11 @@ After `colcon build`, the generated shim scripts in `install/exo_head_slam/lib/e
 | `depth_preprocessor` | `depth_preprocessor_node.py` | Spatial + temporal depth filtering |
 | `semantic_masker` | `semantic_masker_node.py` | YOLOv8-seg dynamic object removal |
 | `extrinsic_solver` | `extrinsic_solver_node.py` | 3D-to-3D SE(3) calibration (ORB or LightGlue) |
-| `depth_mux` | `depth_mux_node.py` | Merges head+exo streams onto single merged topics for NVBlox |
 
 ## Launch
 
-- **`launch/main_pipeline_launch.py`** — top-level entry point. Starts all 4 custom nodes + static TF publishers.
-- RTAB-Map and NVBlox are **optional** — the launch file checks if `rtabmap_slam` / `nvblox_ros` packages exist and skips them silently if not found.
+- **`launch/main_pipeline_launch.py`** — top-level entry point. Starts all 3 custom nodes + static TF publishers.
+- RTAB-Map (single head instance, VO mode) and NVBlox (single fusion node) are **optional** — the launch file checks if `rtabmap_slam` / `nvblox_ros` packages exist and skips them silently if not found.
 
 ## Configuration
 
@@ -44,16 +43,19 @@ Changing topics, filter params, or matcher type requires only YAML edits.
 
 - `ultralytics>=8.0` (requirements.txt) — semantic masker falls back to empty mask if missing
 - `lightglue` + `superpoint` — extrinsic solver falls back to ORB if missing
-- `rtabmap_slam` ROS 2 package — per-camera SLAM, optional
+- `rtabmap_slam` ROS 2 package — head camera VO/SLAM, optional
 - `nvblox_ros` ROS 2 package — volumetric fusion, optional
 
 ## Pipeline Data Flow
 
 ```
-RGB + depth → depth_preprocessor → semantic_masker → rtabmap (optional)
-                                                ↘    nvblox (optional)
-semantic_masker (head+exo) → extrinsic_solver → TF head↔exo
-semantic_masker (head+exo) → depth_mux → merged topics → nvblox
+Head RGB + depth → depth_preprocessor → semantic_masker → rtabmap (head VO, optional)
+                                                     ↘
+Exo RGB + depth  → depth_preprocessor → semantic_masker → nvblox (single node, optional)
+
+semantic_masker (head+exo) → extrinsic_solver → TF head→exo
+rtabmap → TF map→head
+nvblox uses TF tree (map→head, map→head→exo) for fused TSDF
 ```
 
 ## Gotchas

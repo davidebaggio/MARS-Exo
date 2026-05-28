@@ -61,14 +61,6 @@ def generate_launch_description():
         parameters=[common_config, common_params],
     )
 
-    # Depth multiplexer for merged NVBlox input
-    depth_mux = Node(
-        package='exo_head_slam',
-        executable='depth_mux',
-        name='depth_mux',
-        parameters=[common_params],
-    )
-
     # Static transforms to link optical frames to camera_link frames (identity placeholders)
     head_static_tf = Node(
         package='tf2_ros',
@@ -103,15 +95,8 @@ def generate_launch_description():
         head_masker,
         exo_masker,
         extrinsic_solver,
-        depth_mux,
         head_static_tf,
         exo_static_tf,
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(
-                PathJoinSubstitution([pkg_share, 'launch', 'depth_to_pointcloud_launch.py'])
-            ),
-            launch_arguments={'use_sim_time': use_sim_time}.items(),
-        ),
     ]
 
     try:

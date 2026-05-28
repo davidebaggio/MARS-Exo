@@ -28,8 +28,6 @@ setup(
             'depth_preprocessor = exo_head_slam.depth_preprocessor_node:main',
             'semantic_masker = exo_head_slam.semantic_masker_node:main',
             'extrinsic_solver = exo_head_slam.extrinsic_solver_node:main',
-            'depth_mux = exo_head_slam.depth_mux_node:main',
-            'depth_to_pointcloud = exo_head_slam.depth_to_pointcloud_node:main',
         ],
     },
 )
