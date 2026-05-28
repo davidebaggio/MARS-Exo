@@ -1,248 +1,130 @@
-# Multi-Agent RGB-D SLAM Pipeline
+# Multi-Agent RGB-D SLAM and Volumetric Fusion Pipeline
 
-This project implements a topic-driven multi-agent RGB-D pipeline for two synchronized camera streams: the head camera and the exo camera. The design assumes that RGB and depth images are already being published as ROS 2 topics by the upstream camera stack. The package consumes those topics, cleans the depth, removes dynamic objects, estimates the rigid transform between the two views, and forwards the aligned data to mapping and fusion backends.
+This project implements a topic-driven multi-agent RGB-D pipeline for two synchronized camera streams: the head camera and the exo camera. The design assumes that RGB and depth images are already being published as ROS 2 topics by the upstream camera stack. 
+
+The package cleans the depth, removes dynamic objects, estimates the rigid transform between the two views, tracks the robot's pose in the world, and fuses both camera streams into a single, high-fidelity 3D map.
 
 ## High-Level Goal
 
-The goal is to produce a single fused 3D map in a shared coordinate system. RTAB-Map still runs for local SLAM and can expose camera-local maps as optional diagnostic outputs, while NVBlox performs the volumetric fusion in the common frame. The extrinsic solver supplies the TF link between the cameras. The pipeline is structured around five stages:
+The goal is to produce a **single fused 3D map** in a shared coordinate system. 
 
-1. Depth pre-processing
-2. Semantic masking
-3. Per-camera RGB-D SLAM
-4. 3D-to-3D extrinsic calibration
-5. Volumetric fusion
-
-The current implementation is organized so that all runtime topics and parameters are stored in YAML files under `config/`, while the code only reads those parameters at launch time.
+To achieve this, the pipeline separates the concerns of pose tracking and 3D reconstruction:
+* **RTAB-Map** runs purely as a Visual Odometry (VO) / SLAM backend on the head camera to track the robot's movement and broadcast the `map -> head` TF.
+* **The Extrinsic Solver** dynamically calculates and broadcasts the spatial link between the cameras (`head -> exo` TF).
+* **NVBlox** consumes the combined TF tree and the depth streams from both cameras to perform real-time volumetric TSDF fusion into a single global map.
 
 ## Data Flow Overview
 
 ```mermaid
-flowchart LR
-    A1[Head RGB topic] --> B1["Head depth preprocessor<br/>spatial + temporal filtering"]
-    A2[Head depth topic] --> B1
-    B1 --> C1["Head semantic masker<br/>YOLOv8-style segmentation"]
+flowchart TD
+    %% Inputs
+    A1[Head RGB] --> B1[Head Depth Preprocessor]
+    A2[Head Depth] --> B1
+    A3[Exo RGB] --> B2[Exo Depth Preprocessor]
+    A4[Exo Depth] --> B2
+
+    %% Masking
+    B1 --> C1[Head Semantic Masker]
     A1 --> C1
-    C1 --> D1["Head RTAB-Map<br/>local RGB-D SLAM"]
-    A3[Exo RGB topic] --> B2["Exo depth preprocessor<br/>spatial + temporal filtering"]
-    A4[Exo depth topic] --> B2
-    B2 --> C2["Exo semantic masker<br/>YOLOv8-style segmentation"]
+    B2 --> C2[Exo Semantic Masker]
     A3 --> C2
-    C2 --> D2["Exo RTAB-Map<br/>local RGB-D SLAM"]
 
-    C1 --> F["Extrinsic solver<br/>ORB or LightGlue + RANSAC"]
+    %% Tracking & Extrinsics
+    C1 --> D[RTAB-Map VO/SLAM Node]
+    D --> |Publishes TF: map -> head| TF_TREE((TF Tree))
+    
+    C1 --> F[Extrinsic Solver]
     C2 --> F
-    F --> G["TF head -> exo<br/>SE(3) transform"]
-    D1 --> H["Local head map"]
-    D2 --> I["Local exo map"]
-    C1 --> MUX["depth_mux republisher<br/>merge topics & correct frames"]
-    C2 --> MUX
-    MUX --> N["Single NVBlox node<br/>TSDF fusion in common frame"]
-    N --> J["Fused TSDF/mesh<br/>single global map"]
-```
+    F --> |Publishes TF: head -> exo| TF_TREE
 
-Note: the `extrinsic_solver` remains running in this design and publishes the TF used by the unified `nvblox_node` to correctly place each camera frame into the common fusion frame.
-The RTAB-Map local maps are optional diagnostic outputs and are not required for the final fused map.
+    %% Fusion
+    C1 -. Masked Depth .-> N[Single NVBlox Node]
+    C2 -. Masked Depth .-> N
+    TF_TREE -. Poses .-> N
+    
+    N --> J[Single Fused TSDF / Mesh Map]
+```
 
 ## 1. Depth Pre-Processing
 
 The first stage cleans the incoming depth stream before any downstream algorithm sees it. This node subscribes to the camera-specific aligned depth topic and republishes a filtered depth topic.
 
 ### Purpose
-
-- Reduce sensor noise
-- Fill small holes in the depth image
-- Stabilize frame-to-frame depth variation
-- Improve the quality of inputs to masking, SLAM, and extrinsic estimation
+* Reduce sensor noise.
+* Fill small holes in the depth image.
+* Stabilize frame-to-frame depth variation.
+* Improve the quality of inputs to tracking, calibration, and fusion.
 
 ### Current Behavior
-
-Each depth preprocessor performs the following steps:
-
-- Reads the configured input depth topic from YAML
-- Converts the image to metric depth values when needed
-- Sanitizes invalid values such as NaN and infinity
-- Applies a spatial smoothing pass
-- Applies a temporal blending pass using the previous filtered frame
-- Publishes the cleaned depth on the configured output topic
-
-### Files
-
-- [exo_head_slam/depth_preprocessor_node.py](/home/baggio/master_thesis/exo_head_slam/exo_head_slam/depth_preprocessor_node.py)
-- [config/head.yaml](/home/baggio/master_thesis/exo_head_slam/config/head.yaml)
-- [config/exo.yaml](/home/baggio/master_thesis/exo_head_slam/config/exo.yaml)
+Each depth preprocessor reads the input topic from YAML, sanitizes invalid values (NaN, infinity), applies spatial smoothing and temporal blending, and publishes the cleaned depth.
 
 ## 2. Semantic Masking
 
-The second stage removes dynamic objects from both RGB and depth images. This is important because people, moving limbs, or other moving objects can corrupt geometric tracking and map consistency.
+This stage removes dynamic objects from the RGB and depth images. People and moving machinery can corrupt geometric tracking and introduce "ghosting" in the final 3D map.
 
 ### Purpose
-
-- Keep static scene geometry for SLAM and fusion
-- Remove dynamic pixels before they are consumed by downstream nodes
-- Maintain consistency between masked RGB and masked depth
+* Maintain strict static scene geometry for RTAB-Map and NVBlox.
+* Prevent dynamic obstacles from becoming permanent fixtures in the 3D map.
 
 ### Current Behavior
+The semantic masker relies on a detector-backed masking step (e.g., YOLOv8 via Ultralytics). It zeros out masked pixels in both the RGB and Depth images.
 
-The semantic masker:
+*Note: Isaac ROS NVBlox includes a native "People Reconstruction / Dynamic" mode that uses GPU-accelerated U-Net segmentation. If the only dynamic elements in your environment are humans, you can bypass this custom masking stage and feed the preprocessed depth directly into NVBlox's dynamic pipeline.*
 
-- Synchronizes RGB and depth frames
-- Runs a detector-backed semantic masking step using Ultralytics when available
-- Zeros out masked pixels in the RGB image
-- Zeros out the corresponding depth pixels
-- Publishes masked RGB and masked depth topics
+## 3. Pose Tracking (RTAB-Map)
 
-### Notes
-
-The current implementation loads a segmentation model from `masker.model_path` and uses `dynamic_classes` to decide which classes to erase. If Ultralytics is not installed, the node falls back to an empty mask and logs a warning.
-
-If you want the real backend, install the optional Python dependency listed in `requirements.txt`.
-
-### Files
-
-- [exo_head_slam/semantic_masker_node.py](/home/baggio/master_thesis/exo_head_slam/exo_head_slam/semantic_masker_node.py)
-- [config/head.yaml](/home/baggio/master_thesis/exo_head_slam/config/head.yaml)
-- [config/exo.yaml](/home/baggio/master_thesis/exo_head_slam/config/exo.yaml)
-
-## 3. Per-Camera RGB-D SLAM
-
-Each camera runs its own RGB-D SLAM instance using RTAB-Map. The two streams are independent at this stage, which keeps the system modular and lets each agent maintain its own local map.
+Instead of independent per-camera SLAM, the system uses a single RTAB-Map instance attached to the primary camera (Head) to localize the entire agent within the world.
 
 ### Purpose
-
-- Build a local map from each camera stream
-- Estimate camera motion in metric scale
-- Provide the local SLAM output for each viewpoint
+* Provide robust Visual Odometry (VO) and loop closure.
+* Calculate the camera's metric pose in the global frame.
+* Publish the `map -> odom -> head` TF transform required by NVBlox.
 
 ### Current Behavior
-
-RTAB-Map subscribes to:
-
-- Masked RGB image topic
-- Masked depth topic
-- Camera info topic
-
-The launch file constructs the correct remappings from YAML so the RTAB-Map nodes do not depend on hardcoded topic strings.
-
-### Files
-
-- [launch/rtabmap_agents_launch.py](/home/baggio/master_thesis/exo_head_slam/launch/rtabmap_agents_launch.py)
-- [config/head.yaml](/home/baggio/master_thesis/exo_head_slam/config/head.yaml)
-- [config/exo.yaml](/home/baggio/master_thesis/exo_head_slam/config/exo.yaml)
+RTAB-Map is configured to run in localization/odometry mode. It subscribes to the Head camera's masked RGB, masked depth, and camera info. Its internal dense mapping features are disabled to save compute, as NVBlox handles the actual 3D reconstruction.
 
 ## 4. 3D-to-3D Extrinsic Calibration
 
-The extrinsic solver estimates the rigid transform between the head camera and the exo camera.
+The extrinsic solver estimates the rigid transform between the head camera and the exo camera, allowing both sensors to exist in the same mathematical space.
 
 ### Purpose
-
-- Align the two camera frames in SE(3)
-- Broadcast the transform in TF for downstream consumers
-- Provide the spatial link between both local maps
+* Align the two camera frames in SE(3).
+* Broadcast the resulting transform as a TF frame (`head -> exo`).
 
 ### Current Behavior
+The solver extracts 2D feature correspondences using a configurable matcher (`orb` or `lightglue`), deprojects matched pixels into 3D points, and estimates the rigid transform via RANSAC and SVD. This TF is broadcast continuously so downstream nodes know exactly where the exo camera is relative to the head camera.
 
-The solver:
+## 5. Volumetric Fusion (NVBlox)
 
-- Synchronizes masked RGB and depth from both cameras
-- Extracts 2D feature correspondences using a configurable matcher (`orb` by default, `lightglue` as an optional upgrade)
-- Deprojects matched pixels into 3D points using camera intrinsics and depth
-- Rejects invalid correspondences
-- Estimates the rigid transform with RANSAC around an SVD-based transform solver
-- Broadcasts the resulting transform as a TF frame from head to exo
-
-If `lightglue` is selected, the node tries to use `LightGlue + SuperPoint` and falls back to ORB when the optional Python dependencies are not installed.
-
-### Files
-
-- [exo_head_slam/extrinsic_solver_node.py](/home/baggio/master_thesis/exo_head_slam/exo_head_slam/extrinsic_solver_node.py)
-- [exo_head_slam/utils/math_utils.py](/home/baggio/master_thesis/exo_head_slam/exo_head_slam/utils/math_utils.py)
-- [exo_head_slam/utils/vision_utils.py](/home/baggio/master_thesis/exo_head_slam/exo_head_slam/utils/vision_utils.py)
-- [config/common.yaml](/home/baggio/master_thesis/exo_head_slam/config/common.yaml)
-
-## 5. Volumetric Fusion
-
-The final stage feeds the masked RGB-D data into NVBlox for volumetric fusion, but in the current implementation this remains per-camera rather than a single merged map.
+The final stage feeds the masked depth data into a **single** NVBlox node. NVBlox relies on the TF tree generated by RTAB-Map and the Extrinsic Solver to drop depth voxels into the correct global position.
 
 ### Purpose
-
-- Aggregate depth observations over time
-- Smooth random depth noise through voxel fusion
-- Produce a per-camera TSDF-based representation and mesh-ready map
+* Aggregate depth observations from *both* cameras over time.
+* Produce a single, real-time TSDF-based mesh and 2D navigation costmap.
 
 ### Current Behavior
-
-Each camera runs its own NVBlox node, consuming:
-
-- Masked RGB
-- Masked depth
-- Camera info
-
-This stage is designed to keep the per-camera reconstructions metrically consistent in the shared TF frame.
-
-### Files
-
-- [launch/nvblox_fusion_launch.py](/home/baggio/master_thesis/exo_head_slam/launch/nvblox_fusion_launch.py)
-- [config/head.yaml](/home/baggio/master_thesis/exo_head_slam/config/head.yaml)
-- [config/exo.yaml](/home/baggio/master_thesis/exo_head_slam/config/exo.yaml)
+The unified NVBlox node subscribes to the masked depth topics of both the Head and Exo cameras. 
+1. When a Head depth frame arrives, NVBlox looks up the `map -> head` TF and integrates the voxels.
+2. When an Exo depth frame arrives, NVBlox looks up the `map -> head -> exo` TF and integrates the voxels into the exact same map.
 
 ## Configuration Layout
 
 The pipeline is configured through three YAML files:
-
-- [config/head.yaml](/home/baggio/master_thesis/exo_head_slam/config/head.yaml) for the head camera path
-- [config/exo.yaml](/home/baggio/master_thesis/exo_head_slam/config/exo.yaml) for the exo camera path
-- [config/common.yaml](/home/baggio/master_thesis/exo_head_slam/config/common.yaml) for shared parameters such as the extrinsic solver
-
-This split keeps camera-specific topics and parameters isolated while preserving a single shared document for the transform estimation logic.
-
-The shared solver config also exposes `matcher_type`, so you can switch between `orb` and `lightglue` without touching code.
+* `config/head.yaml`: Head camera topics and parameters.
+* `config/exo.yaml`: Exo camera topics and parameters.
+* `config/common.yaml`: Shared parameters (extrinsic solver matchers, TF frame names).
 
 ## Launch Structure
 
-The top-level entry point is [launch/main_pipeline_launch.py](/home/baggio/master_thesis/exo_head_slam/launch/main_pipeline_launch.py).
-
-It starts:
-
-- Two depth preprocessing nodes
-- Two semantic masking nodes
-- One extrinsic solver node
-- The RTAB-Map launch group
-- The NVBlox launch group
-
-The launch graph is intentionally symmetric across head and exo so both streams follow the same processing path. RTAB-Map and NVBlox are launched side by side and consume the same masked inputs; the only coupling between the two camera branches is the extrinsic TF.
-
-## Topic Contract
-
-The pipeline uses these topic groups:
-
-- Raw camera input topics for RGB and depth
-- Filtered depth topics from the preprocessor
-- Masked RGB and depth topics from the semantic masker
-- Camera info topics for intrinsics
-- TF output from the extrinsic solver
-
-All of these topic names are defined in YAML, which keeps the runtime wiring centralized and easy to change.
+The top-level entry point is `launch/main_pipeline_launch.py`. It starts:
+* Two depth preprocessing nodes.
+* Two semantic masking nodes.
+* One extrinsic solver node.
+* **One** RTAB-Map node (Head tracking).
+* **One** NVBlox node (Global fusion).
 
 ## Runtime Assumptions
-
-- RGB and depth images are already published as ROS 2 topics by an upstream camera stack
-- The depth images are aligned to color before they enter this package
-- The two camera streams are roughly time-synchronized
-- Camera calibration data is available through camera info topics
-
-## Implementation Notes
-
-- The current detector in the semantic masker is still a stub and is intended to be replaced with a real segmentation backend
-- The extrinsic solver currently uses ORB features and RANSAC-based rigid alignment
-- RTAB-Map and NVBlox are integrated through their standard ROS 2 interfaces
-- The project is organized so that future changes can be made by editing YAML rather than hardcoding new topics into the Python nodes
-
-## Package Entry Points
-
-The executable nodes are exposed through `setup.py` and include:
-
-- `depth_preprocessor`
-- `semantic_masker`
-- `extrinsic_solver`
-
-These entry points are launched by the ROS 2 launch files rather than by direct script execution.
+* RGB and depth images are published as ROS 2 topics by an upstream camera stack.
+* Depth images are aligned to color before entering this package.
+* The two camera streams are roughly time-synchronized.
+* Camera calibration data is available through `camera_info` topics.

@@ -106,6 +106,12 @@ def generate_launch_description():
         depth_mux,
         head_static_tf,
         exo_static_tf,
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                PathJoinSubstitution([pkg_share, 'launch', 'depth_to_pointcloud_launch.py'])
+            ),
+            launch_arguments={'use_sim_time': use_sim_time}.items(),
+        ),
     ]
 
     try:
