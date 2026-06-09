@@ -33,10 +33,17 @@ class PointCloudPublisherNode(Node):
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
+        from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+        qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=100
+        )
+
         # Sync subscribers
-        self.rgb_sub = message_filters.Subscriber(self, Image, self.input_rgb_topic)
-        self.depth_sub = message_filters.Subscriber(self, Image, self.input_depth_topic)
-        self.info_sub = message_filters.Subscriber(self, CameraInfo, self.input_camera_info_topic)
+        self.rgb_sub = message_filters.Subscriber(self, Image, self.input_rgb_topic, qos_profile=qos)
+        self.depth_sub = message_filters.Subscriber(self, Image, self.input_depth_topic, qos_profile=qos)
+        self.info_sub = message_filters.Subscriber(self, CameraInfo, self.input_camera_info_topic, qos_profile=qos)
         
         # Track raw message arrivals
         self.rgb_sub.registerCallback(lambda _: self._count_msg('rgb'))
@@ -45,7 +52,7 @@ class PointCloudPublisherNode(Node):
 
         self.ts = message_filters.ApproximateTimeSynchronizer(
             [self.rgb_sub, self.depth_sub, self.info_sub],
-            queue_size=10,
+            queue_size=100,
             slop=0.1
         )
         self.ts.registerCallback(self.callback)
@@ -108,28 +115,19 @@ class PointCloudPublisherNode(Node):
 
             # 4. Get Transform
             try:
-                # Try exact time first
+                # Use exact message time
                 transform = self.tf_buffer.lookup_transform(
                     self.global_frame,
                     depth_msg.header.frame_id,
                     depth_msg.header.stamp,
                     rclpy.duration.Duration(seconds=0.1)
                 )
-            except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException):
-                # Fallback to latest available for debug visualization
-                try:
-                    transform = self.tf_buffer.lookup_transform(
-                        self.global_frame,
-                        depth_msg.header.frame_id,
-                        rclpy.time.Time(), # Latest
-                        rclpy.duration.Duration(seconds=0.1)
-                    )
-                except Exception as e:
-                    self.get_logger().warn(
-                        f'TF lookup failed even with latest: {str(e)}',
-                        throttle_duration_sec=5.0
-                    )
-                    return
+            except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as e:
+                self.get_logger().warn(
+                    f'TF lookup failed for {depth_msg.header.frame_id}: {str(e)}',
+                    throttle_duration_sec=5.0
+                )
+                return
 
             # 5. Transform to Global Frame
             q = [transform.transform.rotation.x, transform.transform.rotation.y, 

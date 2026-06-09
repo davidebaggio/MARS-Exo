@@ -15,10 +15,6 @@ def load_section(config_path: str, section: str) -> dict:
     return (data.get(section, {}) or {}).get('ros__parameters', {})
 
 def generate_launch_description():
-    """
-    Launches a single NVBlox node consuming masked depth from both cameras.
-    Uses the TF tree (map -> head, map -> head -> exo) for voxel integration.
-    """
     use_sim_time_arg = DeclareLaunchArgument(
         'use_sim_time',
         default_value='false',
@@ -34,21 +30,26 @@ def generate_launch_description():
 
     nvblox_params = {
         'global_frame': head_params.get('global_frame', 'map'),
+        'voxel_size_m': head_params.get('voxel_size_m', 0.05),
+        'max_integration_distance_m': head_params.get('max_integration_distance_m', 5.0),
+        'mesh_update_period': head_params.get('mesh_update_period', 10),
+        'costmap_resolution': head_params.get('costmap_resolution', 0.1),
+        'costmap_height_min': head_params.get('costmap_height_min', 0.0),
+        'costmap_height_max': head_params.get('costmap_height_max', 1.0),
+        'head_depth_topic': head_params['depth_topic'],
+        'head_rgb_topic': head_params['rgb_topic'],
+        'head_camera_info_topic': head_params['camera_info_topic'],
+        'exo_depth_topic': exo_params['depth_topic'],
+        'exo_rgb_topic': exo_params['rgb_topic'],
+        'exo_camera_info_topic': exo_params['camera_info_topic'],
         'use_sim_time': use_sim_time,
-        'num_cameras': 2,
     }
 
     nvblox_node = Node(
-        package='nvblox_ros',
+        package='exo_head_slam',
         executable='nvblox_node',
         name='nvblox',
         parameters=[nvblox_params],
-        remappings=[
-            ('camera_0/depth/image', head_params['depth_topic']),
-            ('camera_0/depth/camera_info', head_params['camera_info_topic']),
-            ('camera_1/depth/image', exo_params['depth_topic']),
-            ('camera_1/depth/camera_info', exo_params['camera_info_topic']),
-        ],
         output='screen'
     )
 

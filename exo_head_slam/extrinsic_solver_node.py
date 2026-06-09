@@ -163,18 +163,25 @@ class ExtrinsicSolverNode(Node):
         self.exo_rgb_topic = self.get_parameter('exo_rgb_topic').value
         self.exo_depth_topic = self.get_parameter('exo_depth_topic').value
         
+        from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+        qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=100
+        )
+        
         # Subscriptions
-        self.head_info_sub = self.create_subscription(CameraInfo, self.head_camera_info_topic, self.head_info_cb, 10)
-        self.exo_info_sub = self.create_subscription(CameraInfo, self.exo_camera_info_topic, self.exo_info_cb, 10)
+        self.head_info_sub = self.create_subscription(CameraInfo, self.head_camera_info_topic, self.head_info_cb, qos)
+        self.exo_info_sub = self.create_subscription(CameraInfo, self.exo_camera_info_topic, self.exo_info_cb, qos)
         # Subscribers
-        self.head_rgb_sub = message_filters.Subscriber(self, Image, self.head_rgb_topic)
-        self.head_depth_sub = message_filters.Subscriber(self, Image, self.head_depth_topic)
-        self.exo_rgb_sub = message_filters.Subscriber(self, Image, self.exo_rgb_topic)
-        self.exo_depth_sub = message_filters.Subscriber(self, Image, self.exo_depth_topic)
+        self.head_rgb_sub = message_filters.Subscriber(self, Image, self.head_rgb_topic, qos_profile=qos)
+        self.head_depth_sub = message_filters.Subscriber(self, Image, self.head_depth_topic, qos_profile=qos)
+        self.exo_rgb_sub = message_filters.Subscriber(self, Image, self.exo_rgb_topic, qos_profile=qos)
+        self.exo_depth_sub = message_filters.Subscriber(self, Image, self.exo_depth_topic, qos_profile=qos)
         
         self.ts = message_filters.ApproximateTimeSynchronizer(
             [self.head_rgb_sub, self.head_depth_sub, self.exo_rgb_sub, self.exo_depth_sub],
-            queue_size=30,
+            queue_size=100,
             slop=0.1
         )
         self.ts.registerCallback(self.solve_callback)
@@ -236,8 +243,18 @@ class ExtrinsicSolverNode(Node):
             
             # Get optical -> link transforms
             try:
-                t_h_link_opt = self.tf_buffer.lookup_transform(self.head_frame_id, h_rgb.header.frame_id, h_rgb.header.stamp, timeout=rclpy.duration.Duration(seconds=0.1))
-                t_e_link_opt = self.tf_buffer.lookup_transform(self.exo_frame_id, e_rgb.header.frame_id, e_rgb.header.stamp, timeout=rclpy.duration.Duration(seconds=0.1))
+                t_h_link_opt = self.tf_buffer.lookup_transform(
+                    self.head_frame_id, 
+                    h_rgb.header.frame_id, 
+                    h_rgb.header.stamp, 
+                    timeout=rclpy.duration.Duration(seconds=0.1)
+                )
+                t_e_link_opt = self.tf_buffer.lookup_transform(
+                    self.exo_frame_id, 
+                    e_rgb.header.frame_id, 
+                    e_rgb.header.stamp, 
+                    timeout=rclpy.duration.Duration(seconds=0.1)
+                )
                 
                 from scipy.spatial.transform import Rotation as R
                 def tf_to_matrix(tf):
@@ -249,8 +266,11 @@ class ExtrinsicSolverNode(Node):
 
                 T_h_link_opt = tf_to_matrix(t_h_link_opt)
                 T_e_link_opt = tf_to_matrix(t_e_link_opt)
+            except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as e:
+                self.get_logger().warn(f"Waiting for link-to-optical TFs: {str(e)}", throttle_duration_sec=10.0)
+                return
             except Exception as e:
-                self.get_logger().warn(f"Waiting for link-to-optical TFs: {str(e)}")
+                self.get_logger().error(f"Unexpected TF error in solver: {str(e)}")
                 return
 
             for p_h, p_e in zip(pts_head, pts_exo):

@@ -36,7 +36,7 @@ wait_for_pipeline() {
 trap cleanup EXIT INT TERM
 
 cleanup
-colcon build --packages-select exo_head_slam --symlink-install
+make build
 set +u
 source install/setup.bash
 set -u

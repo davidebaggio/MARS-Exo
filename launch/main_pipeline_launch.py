@@ -152,17 +152,13 @@ def generate_launch_description():
     except PackageNotFoundError:
         actions.append(LogInfo(msg='rtabmap_slam not found, skipping RTAB-Map launch.'))
 
-    try:
-        get_package_share_directory('nvblox_ros')
-        actions.append(
-            IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(
-                    PathJoinSubstitution([pkg_share, 'launch', 'nvblox_fusion_launch.py'])
-                ),
-                launch_arguments={'use_sim_time': use_sim_time}.items(),
-            )
+    actions.append(
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                PathJoinSubstitution([pkg_share, 'launch', 'nvblox_fusion_launch.py'])
+            ),
+            launch_arguments={'use_sim_time': use_sim_time}.items(),
         )
-    except PackageNotFoundError:
-        actions.append(LogInfo(msg='nvblox_ros not found, skipping NVBlox launch.'))
+    )
 
     return LaunchDescription(actions)

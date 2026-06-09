@@ -99,9 +99,9 @@ class SemanticMaskerNode(Node):
         self.bridge = CvBridge()
         from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
         qos = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
-            depth=10
+            depth=100
         )
         self.masked_rgb_pub = self.create_publisher(Image, self.output_rgb_topic, qos)
         self.masked_depth_pub = self.create_publisher(Image, self.output_depth_topic, qos)
@@ -110,7 +110,7 @@ class SemanticMaskerNode(Node):
         self.depth_sub = message_filters.Subscriber(self, Image, self.input_depth_topic, qos_profile=qos)
         
         self.ts = message_filters.ApproximateTimeSynchronizer(
-            [self.rgb_sub, self.depth_sub], queue_size=30, slop=0.05
+            [self.rgb_sub, self.depth_sub], queue_size=100, slop=0.1
         )
         self.ts.registerCallback(self.callback)
         
