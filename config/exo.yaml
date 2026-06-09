@@ -2,6 +2,7 @@ exo_depth_preprocessor:
   ros__parameters:
     input_depth_topic: "/camera/exo/aligned_depth_to_color/image_raw"
     output_depth_topic: "/exo/filtered/depth_raw"
+    expected_frame_id: "exo"
     depth_filter.enabled: true
     depth_filter.depth_unit_scale: 0.001
     depth_filter.spatial.kernel_size: 5
@@ -14,13 +15,46 @@ exo_semantic_masker:
   ros__parameters:
     input_rgb_topic: "/camera/exo/color/image_raw"
     input_depth_topic: "/exo/filtered/depth_raw"
+    expected_frame_id: "exo"
     output_rgb_topic: "/exo/masked/image_raw"
     output_depth_topic: "/exo/masked/depth_raw"
     masker.model_path: "yolov8n-seg.pt"
-    masker.conf_threshold: 0.25
+    masker.conf_threshold: 0.20
     masker.dynamic_classes: [0, 1, 2, 3, 5, 7]
 
 exo_nvblox:
   ros__parameters:
     depth_topic: "/exo/masked/depth_raw"
     camera_info_topic: "/camera/exo/color/camera_info"
+
+extrinsic_solver:
+  ros__parameters:
+    exo_height_m: 0.95
+
+exo_rtabmap:
+  ros__parameters:
+    subscribe_depth: true
+    frame_id: "exo_link"
+    map_frame_id: "map"
+    odom_frame_id: "odom"
+    publish_tf: true
+    subscribe_odom_info: true
+    approx_sync: true
+    approx_sync_max_interval: 0.1
+    queue_size: 100
+    wait_for_transform: 0.2
+    rgb_topic: "/exo/masked/image_raw"
+    depth_topic: "/exo/masked/depth_raw"
+    camera_info_topic: "/camera/exo/color/camera_info"
+    RGBD/CreateOccupancyGrid: "true"
+    Grid/FromDepth: "true"
+    Grid/MaxGroundHeight: "0.1"
+    Grid/MaxObstacleHeight: "2.0"
+    Odom/Strategy: "0" # Frame-to-Map
+    Vis/EstimationType: "0" # 3D->2D (PnP)
+    Vis/MinInliers: "5"
+    Vis/InlierDistance: "0.1"
+    Vis/CorGuessWinSize: "0"
+    Vis/FeatureType: "8" # GFTT/ORB
+    Vis/MaxFeatures: "1000"
+

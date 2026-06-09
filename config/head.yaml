@@ -2,6 +2,7 @@ head_depth_preprocessor:
   ros__parameters:
     input_depth_topic: "/camera/head/aligned_depth_to_color/image_raw"
     output_depth_topic: "/head/filtered/depth_raw"
+    expected_frame_id: "head"
     depth_filter.enabled: true
     depth_filter.depth_unit_scale: 0.001
     depth_filter.spatial.kernel_size: 5
@@ -14,6 +15,7 @@ head_semantic_masker:
   ros__parameters:
     input_rgb_topic: "/camera/head/color/image_raw"
     input_depth_topic: "/head/filtered/depth_raw"
+    expected_frame_id: "head"
     output_rgb_topic: "/head/masked/image_raw"
     output_depth_topic: "/head/masked/depth_raw"
     masker.model_path: "yolov8n-seg.pt"
@@ -23,7 +25,7 @@ head_semantic_masker:
 head_rtabmap:
   ros__parameters:
     subscribe_depth: true
-    frame_id: "head_camera_link"
+    frame_id: "head_link"
     approx_sync: true
     wait_for_transform: 0.2
     rgb_topic: "/head/masked/image_raw"

@@ -35,14 +35,7 @@ def generate_launch_description():
     nvblox_params = {
         'global_frame': head_params.get('global_frame', 'map'),
         'use_sim_time': use_sim_time,
-        'depth_topic_names': [
-            head_params['depth_topic'],
-            exo_params['depth_topic'],
-        ],
-        'camera_info_topic_names': [
-            head_params['camera_info_topic'],
-            exo_params['camera_info_topic'],
-        ],
+        'num_cameras': 2,
     }
 
     nvblox_node = Node(
@@ -50,6 +43,12 @@ def generate_launch_description():
         executable='nvblox_node',
         name='nvblox',
         parameters=[nvblox_params],
+        remappings=[
+            ('camera_0/depth/image', head_params['depth_topic']),
+            ('camera_0/depth/camera_info', head_params['camera_info_topic']),
+            ('camera_1/depth/image', exo_params['depth_topic']),
+            ('camera_1/depth/camera_info', exo_params['camera_info_topic']),
+        ],
         output='screen'
     )
 

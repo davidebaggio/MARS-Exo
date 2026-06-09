@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DEFAULT_BAG="$HOME/master_thesis/SLAM3R/data/exo/rosbag2_2026_05_06-16_48_23/rosbag2_2026_05_06-16_48_23_0.mcap"
+DEFAULT_BAG="$HOME/master_thesis/SLAM3R/data/exo/rosbag2_2026_05_06-16_55_45/rosbag2_2026_05_06-16_55_45_0.mcap"
 BAG_PATH="${1:-$DEFAULT_BAG}"
 
 cleanup() {
@@ -14,7 +14,11 @@ cleanup() {
 	if [[ -n "${RVIZ_PID:-}" ]] && kill -0 "$RVIZ_PID" 2>/dev/null; then
 		kill "$RVIZ_PID" || true
 	fi
-	pkill -f '/home/baggio/master_thesis/exo_head_slam/install/exo_head_slam/lib/exo_head_slam/(semantic_masker|extrinsic_solver)' || true
+	# Kill all nodes by executable name to ensure no zombies remain
+	pkill -f 'depth_preprocessor' || true
+	pkill -f 'semantic_masker' || true
+	pkill -f 'extrinsic_solver' || true
+	pkill -f 'ros2 bag play' || true
 }
 
 wait_for_pipeline() {
@@ -43,13 +47,14 @@ if [ -d "install/exo_head_slam/lib/exo_head_slam" ]; then
     sed -i "1s|^#!.*python.*|#!$(which python3)|" install/exo_head_slam/lib/exo_head_slam/*
 fi
 
-ros2 launch exo_head_slam main_pipeline_launch.py use_sim_time:=true &
+ros2 launch exo_head_slam main_pipeline_launch.py use_sim_time:=true publish_debug_pcl:=true global_frame:=odom &
 PIPELINE_PID=$!
 
 wait_for_pipeline
 
 echo "Starting bag playback: $BAG_PATH"
-ros2 bag play -i "$BAG_PATH" mcap --loop --rate 0.1 --disable-keyboard-controls --clock > /tmp/exo_head_slam_bag.log 2>&1 &
+ros2 bag play -i "$BAG_PATH" mcap --loop --rate 0.1 --disable-keyboard-controls --clock \
+     > /tmp/exo_head_slam_bag.log 2>&1 &
 BAG_PID=$!
 
 # Launch RViz with pre-configured displays

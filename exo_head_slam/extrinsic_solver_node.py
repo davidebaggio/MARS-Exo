@@ -135,10 +135,20 @@ class ExtrinsicSolverNode(Node):
         self.declare_parameter('matcher_type', 'orb')
         self.declare_parameter('lightglue_device', 'cpu')
         self.declare_parameter('lightglue_max_keypoints', 2048)
+        self.declare_parameter('tf_filter_alpha', 0.1)
+        self.declare_parameter('exo_height_m', -1.0) # Default -1.0 to fallback if not in config
 
         self.bridge = CvBridge()
         self.matcher = self.create_matcher()
         self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        
+        # Filtering state
+        self.tf_filter_alpha = float(self.get_parameter('tf_filter_alpha').value)
+        self.exo_height_m = float(self.get_parameter('exo_height_m').value)
+        self.current_t: Optional[np.ndarray] = None
+        self.current_q: Optional[np.ndarray] = None
         
         # Intrinsics storage
         self.head_k: Optional[np.ndarray] = None
@@ -165,7 +175,7 @@ class ExtrinsicSolverNode(Node):
         self.ts = message_filters.ApproximateTimeSynchronizer(
             [self.head_rgb_sub, self.head_depth_sub, self.exo_rgb_sub, self.exo_depth_sub],
             queue_size=30,
-            slop=0.5
+            slop=0.1
         )
         self.ts.registerCallback(self.solve_callback)
         
@@ -197,6 +207,11 @@ class ExtrinsicSolverNode(Node):
         self.exo_k = np.array(msg.k).reshape(3, 3)
 
     def solve_callback(self, h_rgb: Image, h_depth: Image, e_rgb: Image, e_depth: Image):
+        # Relaxed verification for better stability
+        if "head" not in h_rgb.header.frame_id or "exo" not in e_rgb.header.frame_id:
+             self.get_logger().error(f"Sync error: head_frame={h_rgb.header.frame_id}, exo_frame={e_rgb.header.frame_id}")
+             return
+
         self.get_logger().info("Solver received synced image quad.")
         if self.head_k is None or self.exo_k is None:
             self.get_logger().warn("Waiting for CameraInfo...")
@@ -219,13 +234,35 @@ class ExtrinsicSolverNode(Node):
             points_3d_head = []
             points_3d_exo = []
             
-            for p_h, p_e in zip(pts_head, pts_exo):
-                p3_h = get_3d_point(int(p_h[0]), int(p_h[1]), head_dep, self.head_k)
-                p3_e = get_3d_point(int(p_e[0]), int(p_e[1]), exo_dep, self.exo_k)
+            # Get optical -> link transforms
+            try:
+                t_h_link_opt = self.tf_buffer.lookup_transform(self.head_frame_id, h_rgb.header.frame_id, h_rgb.header.stamp, timeout=rclpy.duration.Duration(seconds=0.1))
+                t_e_link_opt = self.tf_buffer.lookup_transform(self.exo_frame_id, e_rgb.header.frame_id, e_rgb.header.stamp, timeout=rclpy.duration.Duration(seconds=0.1))
                 
-                if p3_h is not None and p3_e is not None:
-                    points_3d_head.append(p3_h)
-                    points_3d_exo.append(p3_e)
+                from scipy.spatial.transform import Rotation as R
+                def tf_to_matrix(tf):
+                    mat = np.eye(4)
+                    q = [tf.transform.rotation.x, tf.transform.rotation.y, tf.transform.rotation.z, tf.transform.rotation.w]
+                    mat[:3, :3] = R.from_quat(q).as_matrix()
+                    mat[:3, 3] = [tf.transform.translation.x, tf.transform.translation.y, tf.transform.translation.z]
+                    return mat
+
+                T_h_link_opt = tf_to_matrix(t_h_link_opt)
+                T_e_link_opt = tf_to_matrix(t_e_link_opt)
+            except Exception as e:
+                self.get_logger().warn(f"Waiting for link-to-optical TFs: {str(e)}")
+                return
+
+            for p_h, p_e in zip(pts_head, pts_exo):
+                p3_h_opt = get_3d_point(int(p_h[0]), int(p_h[1]), head_dep, self.head_k)
+                p3_e_opt = get_3d_point(int(p_e[0]), int(p_e[1]), exo_dep, self.exo_k)
+                
+                if p3_h_opt is not None and p3_e_opt is not None:
+                    # Transform to link frames
+                    p3_h_link = (T_h_link_opt[:3, :3] @ p3_h_opt) + T_h_link_opt[:3, 3]
+                    p3_e_link = (T_e_link_opt[:3, :3] @ p3_e_opt) + T_e_link_opt[:3, 3]
+                    points_3d_head.append(p3_h_link)
+                    points_3d_exo.append(p3_e_link)
             
             points_3d_head = np.array(points_3d_head)
             points_3d_exo = np.array(points_3d_exo)
@@ -234,60 +271,62 @@ class ExtrinsicSolverNode(Node):
                 self.get_logger().warn(f"Insufficient 3D matches ({len(points_3d_head)}/{self.min_3d_matches}). Skipping.")
                 return
 
-            # Solve
-            T = compute_transform_ransac(points_3d_head, points_3d_exo)
+            # Solve for HeadLink in ExoLink frame (T_exo_head)
+            T = compute_transform_ransac(points_3d_head, points_3d_exo) 
             
             if T is not None:
-                self.broadcast_transform(T, h_rgb.header.stamp)
+                # Height constraint ground truth
+                if self.exo_height_m > 0:
+                    try:
+                        # Lookup map -> odom or map -> exo transform to constrain exo height
+                        # Since exo is now the SLAM source, map -> exo_camera_link is available
+                        t_map_e = self.tf_buffer.lookup_transform('map', self.exo_frame_id, e_rgb.header.stamp,
+                                                                 timeout=rclpy.duration.Duration(seconds=0.1))
+                        
+                        # Note: If constraining exo_height, we just use the SLAM output or adjust SLAM.
+                        # For now, we keep the solver producing relative TF.
+                        pass
+                    except Exception as e:
+                        self.get_logger().debug(f"Height constraint skipped: {str(e)}")
+
+                self.broadcast_transform(T, e_rgb.header.stamp)
                 
         except Exception as e:
             self.get_logger().error(f"Solver callback failed: {str(e)}")
 
     def broadcast_transform(self, T: np.ndarray, stamp):
+        from scipy.spatial.transform import Rotation as R
+        new_t = T[:3, 3]
+        new_q = R.from_matrix(T[:3, :3]).as_quat() # [x, y, z, w]
+
+        if self.current_t is None:
+            self.current_t = new_t
+            self.current_q = new_q
+        else:
+            # EMA for translation
+            self.current_t = (1.0 - self.tf_filter_alpha) * self.current_t + self.tf_filter_alpha * new_t
+            
+            # EMA for quaternion
+            if np.dot(self.current_q, new_q) < 0:
+                new_q = -new_q
+            self.current_q = (1.0 - self.tf_filter_alpha) * self.current_q + self.tf_filter_alpha * new_q
+            self.current_q /= np.linalg.norm(self.current_q)
+
         t_msg = TransformStamped()
         t_msg.header.stamp = stamp
-        t_msg.header.frame_id = self.head_frame_id
-        t_msg.child_frame_id = self.exo_frame_id
+        t_msg.header.frame_id = self.exo_frame_id
+        t_msg.child_frame_id = self.head_frame_id
         
-        t_msg.transform.translation.x = T[0, 3]
-        t_msg.transform.translation.y = T[1, 3]
-        t_msg.transform.translation.z = T[2, 3]
+        t_msg.transform.translation.x = float(self.current_t[0])
+        t_msg.transform.translation.y = float(self.current_t[1])
+        t_msg.transform.translation.z = float(self.current_t[2])
         
-        q = self.rot_to_quat(T[:3, :3])
-        t_msg.transform.rotation.x = q[0]
-        t_msg.transform.rotation.y = q[1]
-        t_msg.transform.rotation.z = q[2]
-        t_msg.transform.rotation.w = q[3]
+        t_msg.transform.rotation.x = float(self.current_q[0])
+        t_msg.transform.rotation.y = float(self.current_q[1])
+        t_msg.transform.rotation.z = float(self.current_q[2])
+        t_msg.transform.rotation.w = float(self.current_q[3])
         
         self.tf_broadcaster.sendTransform(t_msg)
-
-    def rot_to_quat(self, R: np.ndarray) -> np.ndarray:
-        tr = np.trace(R)
-        if tr > 0:
-            S = np.sqrt(tr + 1.0) * 2
-            qw = 0.25 * S
-            qx = (R[2, 1] - R[1, 2]) / S
-            qy = (R[0, 2] - R[2, 0]) / S
-            qz = (R[1, 0] - R[0, 1]) / S
-        elif (R[0, 0] > R[1, 1]) and (R[0, 0] > R[2, 2]):
-            S = np.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2]) * 2
-            qw = (R[2, 1] - R[1, 2]) / S
-            qx = 0.25 * S
-            qy = (R[0, 1] + R[1, 0]) / S
-            qz = (R[0, 2] + R[2, 0]) / S
-        elif R[1, 1] > R[2, 2]:
-            S = np.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2]) * 2
-            qw = (R[0, 2] - R[2, 0]) / S
-            qx = (R[0, 1] + R[1, 0]) / S
-            qy = 0.25 * S
-            qz = (R[1, 2] + R[2, 1]) / S
-        else:
-            S = np.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1]) * 2
-            qw = (R[1, 0] - R[0, 1]) / S
-            qx = (R[0, 2] + R[2, 0]) / S
-            qy = (R[1, 2] + R[2, 1]) / S
-            qz = 0.25 * S
-        return np.array([qx, qy, qz, qw])
 
 def main(args=None):
     rclpy.init(args=args)

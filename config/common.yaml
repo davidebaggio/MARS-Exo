@@ -9,6 +9,7 @@ extrinsic_solver:
     exo_depth_topic: "/exo/masked/depth_raw"
     head_camera_info_topic: "/camera/head/color/camera_info"
     exo_camera_info_topic: "/camera/exo/color/camera_info"
-    head_frame_id: "head_camera_link"
-    exo_frame_id: "exo_camera_link"
+    head_frame_id: "head_link"
+    exo_frame_id: "exo_link"
     min_3d_matches: 15
+    tf_filter_alpha: 0.1
