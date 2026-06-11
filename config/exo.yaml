@@ -46,6 +46,7 @@ exo_rtabmap:
     rgb_topic: "/exo/masked/image_raw"
     depth_topic: "/exo/masked/depth_raw"
     camera_info_topic: "/camera/exo/color/camera_info"
+    database_path: "~/.ros/rtabmap_exo.db"
     RGBD/CreateOccupancyGrid: "true"
     Grid/FromDepth: "true"
     Grid/MaxGroundHeight: "0.1"

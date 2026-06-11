@@ -8,6 +8,7 @@ from cv_bridge import CvBridge
 import numpy as np
 import cv2
 from typing import Optional, Tuple
+from scipy.spatial.transform import Rotation as R
 from .utils.math_utils import compute_transform_ransac
 from .utils.vision_utils import get_3d_point
 
@@ -131,12 +132,13 @@ class ExtrinsicSolverNode(Node):
         self.declare_parameter('exo_camera_info_topic', '')
         self.declare_parameter('head_frame_id', '')
         self.declare_parameter('exo_frame_id', '')
+        self.declare_parameter('head_map_frame_id', 'head_map')
+        self.declare_parameter('exo_map_frame_id', 'map')
         self.declare_parameter('min_3d_matches', 0)
         self.declare_parameter('matcher_type', 'orb')
         self.declare_parameter('lightglue_device', 'cpu')
         self.declare_parameter('lightglue_max_keypoints', 2048)
         self.declare_parameter('tf_filter_alpha', 0.1)
-        self.declare_parameter('exo_height_m', -1.0) # Default -1.0 to fallback if not in config
 
         self.bridge = CvBridge()
         self.matcher = self.create_matcher()
@@ -144,17 +146,18 @@ class ExtrinsicSolverNode(Node):
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
         
-        # Filtering state
+        # SLAM Bridge State (Map-to-Map)
+        self.bridge_t: Optional[np.ndarray] = None
+        self.bridge_q: Optional[np.ndarray] = None
         self.tf_filter_alpha = float(self.get_parameter('tf_filter_alpha').value)
-        self.exo_height_m = float(self.get_parameter('exo_height_m').value)
-        self.current_t: Optional[np.ndarray] = None
-        self.current_q: Optional[np.ndarray] = None
         
         # Intrinsics storage
         self.head_k: Optional[np.ndarray] = None
         self.exo_k: Optional[np.ndarray] = None
         self.head_frame_id = self.get_parameter('head_frame_id').value
         self.exo_frame_id = self.get_parameter('exo_frame_id').value
+        self.head_map_frame_id = self.get_parameter('head_map_frame_id').value
+        self.exo_map_frame_id = self.get_parameter('exo_map_frame_id').value
         self.min_3d_matches = int(self.get_parameter('min_3d_matches').value)
         self.head_camera_info_topic = self.get_parameter('head_camera_info_topic').value
         self.exo_camera_info_topic = self.get_parameter('exo_camera_info_topic').value
@@ -166,7 +169,7 @@ class ExtrinsicSolverNode(Node):
         # Subscriptions
         self.head_info_sub = self.create_subscription(CameraInfo, self.head_camera_info_topic, self.head_info_cb, 10)
         self.exo_info_sub = self.create_subscription(CameraInfo, self.exo_camera_info_topic, self.exo_info_cb, 10)
-        # Subscribers
+        
         self.head_rgb_sub = message_filters.Subscriber(self, Image, self.head_rgb_topic)
         self.head_depth_sub = message_filters.Subscriber(self, Image, self.head_depth_topic)
         self.exo_rgb_sub = message_filters.Subscriber(self, Image, self.exo_rgb_topic)
@@ -179,7 +182,10 @@ class ExtrinsicSolverNode(Node):
         )
         self.ts.registerCallback(self.solve_callback)
         
-        self.get_logger().info(f"Extrinsic Solver Node ({self.matcher.name}) initialized.")
+        # Periodic TF broadcaster for the bridge
+        self.tf_timer = self.create_timer(0.05, self.broadcast_bridge_tf) # 20Hz
+        
+        self.get_logger().info(f"Extrinsic Solver Node ({self.matcher.name}) initialized with Map-to-Map Bridging.")
 
     def create_matcher(self):
         matcher_type = str(self.get_parameter('matcher_type').value).strip().lower()
@@ -190,14 +196,7 @@ class ExtrinsicSolverNode(Node):
             )
             if lightglue_matcher.available:
                 return lightglue_matcher
-
-            self.get_logger().warn(
-                f"LightGlue richiesto ma non disponibile, fallback a ORB: {lightglue_matcher.error}"
-            )
-
-        if matcher_type not in ('orb', 'lightglue'):
-            self.get_logger().warn(f"matcher_type sconosciuto '{matcher_type}', uso ORB.")
-
+            self.get_logger().warn(f"LightGlue unavailable, fallback to ORB: {lightglue_matcher.error}")
         return ORBMatcher()
 
     def head_info_cb(self, msg: CameraInfo):
@@ -206,15 +205,23 @@ class ExtrinsicSolverNode(Node):
     def exo_info_cb(self, msg: CameraInfo):
         self.exo_k = np.array(msg.k).reshape(3, 3)
 
-    def solve_callback(self, h_rgb: Image, h_depth: Image, e_rgb: Image, e_depth: Image):
-        # Relaxed verification for better stability
-        if "head" not in h_rgb.header.frame_id or "exo" not in e_rgb.header.frame_id:
-             self.get_logger().error(f"Sync error: head_frame={h_rgb.header.frame_id}, exo_frame={e_rgb.header.frame_id}")
-             return
+    def tf_to_matrix(self, tf: TransformStamped) -> np.ndarray:
+        mat = np.eye(4)
+        q = [tf.transform.rotation.x, tf.transform.rotation.y, tf.transform.rotation.z, tf.transform.rotation.w]
+        mat[:3, :3] = R.from_quat(q).as_matrix()
+        mat[:3, 3] = [tf.transform.translation.x, tf.transform.translation.y, tf.transform.translation.z]
+        return mat
 
-        self.get_logger().info("Solver received synced image quad.")
+    def get_tf_matrix(self, target_frame: str, source_frame: str, time) -> Optional[np.ndarray]:
+        try:
+            tf = self.tf_buffer.lookup_transform(target_frame, source_frame, time, timeout=rclpy.duration.Duration(seconds=0.1))
+            return self.tf_to_matrix(tf)
+        except Exception as e:
+            self.get_logger().debug(f"TF lookup failed {source_frame}->{target_frame}: {str(e)}")
+            return None
+
+    def solve_callback(self, h_rgb: Image, h_depth: Image, e_rgb: Image, e_depth: Image):
         if self.head_k is None or self.exo_k is None:
-            self.get_logger().warn("Waiting for CameraInfo...")
             return
 
         try:
@@ -223,108 +230,73 @@ class ExtrinsicSolverNode(Node):
             exo_img = self.bridge.imgmsg_to_cv2(e_rgb, 'bgr8')
             exo_dep = self.bridge.imgmsg_to_cv2(e_depth, 'passthrough')
 
-            # Match
+            # 1. Feature Matching
             pts_head, pts_exo = self.matcher.match(head_img, exo_img)
-
-            if len(pts_head) == 0 or len(pts_exo) == 0:
-                self.get_logger().warn("Nessun match 2D valido trovato.")
-                return
             
-            # Deproject
-            points_3d_head = []
-            points_3d_exo = []
-            
-            # Get optical -> link transforms
-            try:
-                t_h_link_opt = self.tf_buffer.lookup_transform(self.head_frame_id, h_rgb.header.frame_id, h_rgb.header.stamp, timeout=rclpy.duration.Duration(seconds=0.1))
-                t_e_link_opt = self.tf_buffer.lookup_transform(self.exo_frame_id, e_rgb.header.frame_id, e_rgb.header.stamp, timeout=rclpy.duration.Duration(seconds=0.1))
+            if len(pts_head) >= self.min_3d_matches:
+                T_h_link_opt = self.get_tf_matrix(self.head_frame_id, h_rgb.header.frame_id, h_rgb.header.stamp)
+                T_e_link_opt = self.get_tf_matrix(self.exo_frame_id, e_rgb.header.frame_id, e_rgb.header.stamp)
                 
-                from scipy.spatial.transform import Rotation as R
-                def tf_to_matrix(tf):
-                    mat = np.eye(4)
-                    q = [tf.transform.rotation.x, tf.transform.rotation.y, tf.transform.rotation.z, tf.transform.rotation.w]
-                    mat[:3, :3] = R.from_quat(q).as_matrix()
-                    mat[:3, 3] = [tf.transform.translation.x, tf.transform.translation.y, tf.transform.translation.z]
-                    return mat
-
-                T_h_link_opt = tf_to_matrix(t_h_link_opt)
-                T_e_link_opt = tf_to_matrix(t_e_link_opt)
-            except Exception as e:
-                self.get_logger().warn(f"Waiting for link-to-optical TFs: {str(e)}")
-                return
-
-            for p_h, p_e in zip(pts_head, pts_exo):
-                p3_h_opt = get_3d_point(int(p_h[0]), int(p_h[1]), head_dep, self.head_k)
-                p3_e_opt = get_3d_point(int(p_e[0]), int(p_e[1]), exo_dep, self.exo_k)
-                
-                if p3_h_opt is not None and p3_e_opt is not None:
-                    # Transform to link frames
-                    p3_h_link = (T_h_link_opt[:3, :3] @ p3_h_opt) + T_h_link_opt[:3, 3]
-                    p3_e_link = (T_e_link_opt[:3, :3] @ p3_e_opt) + T_e_link_opt[:3, 3]
-                    points_3d_head.append(p3_h_link)
-                    points_3d_exo.append(p3_e_link)
-            
-            points_3d_head = np.array(points_3d_head)
-            points_3d_exo = np.array(points_3d_exo)
-
-            if len(points_3d_head) < self.min_3d_matches:
-                self.get_logger().warn(f"Insufficient 3D matches ({len(points_3d_head)}/{self.min_3d_matches}). Skipping.")
-                return
-
-            # Solve for HeadLink in ExoLink frame (T_exo_head)
-            T = compute_transform_ransac(points_3d_head, points_3d_exo) 
-            
-            if T is not None:
-                # Height constraint ground truth
-                if self.exo_height_m > 0:
-                    try:
-                        # Lookup map -> odom or map -> exo transform to constrain exo height
-                        # Since exo is now the SLAM source, map -> exo_camera_link is available
-                        t_map_e = self.tf_buffer.lookup_transform('map', self.exo_frame_id, e_rgb.header.stamp,
-                                                                 timeout=rclpy.duration.Duration(seconds=0.1))
-                        
-                        # Note: If constraining exo_height, we just use the SLAM output or adjust SLAM.
-                        # For now, we keep the solver producing relative TF.
-                        pass
-                    except Exception as e:
-                        self.get_logger().debug(f"Height constraint skipped: {str(e)}")
-
-                self.broadcast_transform(T, e_rgb.header.stamp)
+                if T_h_link_opt is not None and T_e_link_opt is not None:
+                    points_3d_head = []
+                    points_3d_exo = []
+                    for p_h, p_e in zip(pts_head, pts_exo):
+                        p3_h_opt = get_3d_point(int(p_h[0]), int(p_h[1]), head_dep, self.head_k)
+                        p3_e_opt = get_3d_point(int(p_e[0]), int(p_e[1]), exo_dep, self.exo_k)
+                        if p3_h_opt is not None and p3_e_opt is not None:
+                            p3_h_link = (T_h_link_opt[:3, :3] @ p3_h_opt) + T_h_link_opt[:3, 3]
+                            p3_e_link = (T_e_link_opt[:3, :3] @ p3_e_opt) + T_e_link_opt[:3, 3]
+                            points_3d_head.append(p3_h_link)
+                            points_3d_exo.append(p3_e_link)
+                    
+                    if len(points_3d_head) >= self.min_3d_matches:
+                        T_exo_head = compute_transform_ransac(np.array(points_3d_head), np.array(points_3d_exo))
+                        if T_exo_head is not None:
+                            # 2. Update Map-to-Map Bridge
+                            # T_Me_Mh = T_Me_exo * T_exo_head * inv(T_Mh_head)
+                            T_Me_exo = self.get_tf_matrix(self.exo_map_frame_id, self.exo_frame_id, rclpy.time.Time())
+                            T_Mh_head = self.get_tf_matrix(self.head_map_frame_id, self.head_frame_id, rclpy.time.Time())
+                            
+                            if T_Me_exo is not None and T_Mh_head is not None:
+                                new_bridge = T_Me_exo @ T_exo_head @ np.linalg.inv(T_Mh_head)
+                                self.update_bridge_state(new_bridge)
                 
         except Exception as e:
             self.get_logger().error(f"Solver callback failed: {str(e)}")
 
-    def broadcast_transform(self, T: np.ndarray, stamp):
-        from scipy.spatial.transform import Rotation as R
+    def update_bridge_state(self, T: np.ndarray):
         new_t = T[:3, 3]
-        new_q = R.from_matrix(T[:3, :3]).as_quat() # [x, y, z, w]
+        new_q = R.from_matrix(T[:3, :3]).as_quat()
 
-        if self.current_t is None:
-            self.current_t = new_t
-            self.current_q = new_q
+        if self.bridge_t is None:
+            self.bridge_t = new_t
+            self.bridge_q = new_q
+            self.get_logger().info(f"SLAM Bridge ESTABLISHED between {self.exo_map_frame_id} and {self.head_map_frame_id}")
         else:
-            # EMA for translation
-            self.current_t = (1.0 - self.tf_filter_alpha) * self.current_t + self.tf_filter_alpha * new_t
-            
-            # EMA for quaternion
-            if np.dot(self.current_q, new_q) < 0:
+            # EMA filter for the bridge itself
+            self.bridge_t = (1.0 - self.tf_filter_alpha) * self.bridge_t + self.tf_filter_alpha * new_t
+            if np.dot(self.bridge_q, new_q) < 0:
                 new_q = -new_q
-            self.current_q = (1.0 - self.tf_filter_alpha) * self.current_q + self.tf_filter_alpha * new_q
-            self.current_q /= np.linalg.norm(self.current_q)
+            self.bridge_q = (1.0 - self.tf_filter_alpha) * self.bridge_q + self.tf_filter_alpha * new_q
+            self.bridge_q /= np.linalg.norm(self.bridge_q)
 
+    def broadcast_bridge_tf(self):
+        if self.bridge_t is None:
+            return
+            
         t_msg = TransformStamped()
-        t_msg.header.stamp = stamp
-        t_msg.header.frame_id = self.exo_frame_id
-        t_msg.child_frame_id = self.head_frame_id
+        t_msg.header.stamp = self.get_clock().now().to_msg()
+        t_msg.header.frame_id = self.exo_map_frame_id
+        t_msg.child_frame_id = self.head_map_frame_id
         
-        t_msg.transform.translation.x = float(self.current_t[0])
-        t_msg.transform.translation.y = float(self.current_t[1])
-        t_msg.transform.translation.z = float(self.current_t[2])
+        t_msg.transform.translation.x = float(self.bridge_t[0])
+        t_msg.transform.translation.y = float(self.bridge_t[1])
+        t_msg.transform.translation.z = float(self.bridge_t[2])
         
-        t_msg.transform.rotation.x = float(self.current_q[0])
-        t_msg.transform.rotation.y = float(self.current_q[1])
-        t_msg.transform.rotation.z = float(self.current_q[2])
-        t_msg.transform.rotation.w = float(self.current_q[3])
+        t_msg.transform.rotation.x = float(self.bridge_q[0])
+        t_msg.transform.rotation.y = float(self.bridge_q[1])
+        t_msg.transform.rotation.z = float(self.bridge_q[2])
+        t_msg.transform.rotation.w = float(self.bridge_q[3])
         
         self.tf_broadcaster.sendTransform(t_msg)
 

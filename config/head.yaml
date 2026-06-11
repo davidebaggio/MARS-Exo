@@ -26,13 +26,27 @@ head_rtabmap:
   ros__parameters:
     subscribe_depth: true
     frame_id: "head_link"
+    map_frame_id: "head_map"
+    odom_frame_id: "head_odom"
+    publish_tf: true
+    subscribe_odom_info: true
     approx_sync: true
+    approx_sync_max_interval: 0.1
+    queue_size: 100
     wait_for_transform: 0.2
     rgb_topic: "/head/masked/image_raw"
     depth_topic: "/head/masked/depth_raw"
     camera_info_topic: "/camera/head/color/camera_info"
-    RGBD/CreateOccupancyGrid: false
-    Grid/FromDepth: false
+    database_path: "~/.ros/rtabmap_head.db"
+    RGBD/CreateOccupancyGrid: "false"
+    Grid/FromDepth: "false"
+    Odom/Strategy: "0" # Frame-to-Map
+    Vis/EstimationType: "0" # 3D->2D (PnP)
+    Vis/MinInliers: "5"
+    Vis/InlierDistance: "0.1"
+    Vis/CorGuessWinSize: "0"
+    Vis/FeatureType: "8" # GFTT/ORB
+    Vis/MaxFeatures: "1000"
 
 head_nvblox:
   ros__parameters:

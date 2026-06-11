@@ -11,5 +11,7 @@ extrinsic_solver:
     exo_camera_info_topic: "/camera/exo/color/camera_info"
     head_frame_id: "head_link"
     exo_frame_id: "exo_link"
+    head_map_frame_id: "head_map"
+    exo_map_frame_id: "map"
     min_3d_matches: 15
     tf_filter_alpha: 0.1
