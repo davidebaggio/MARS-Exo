@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DEFAULT_BAG="$HOME/master_thesis/SLAM3R/data/exo/rosbag2_2026_05_06-16_55_45/rosbag2_2026_05_06-16_55_45_0.mcap"
+DEFAULT_BAG="data/rosbag2_2026_06_11-15_34_13/rosbag2_2026_06_11-15_34_13_0.mcap"
 BAG_PATH="${1:-$DEFAULT_BAG}"
 
 cleanup() {
@@ -53,9 +53,8 @@ PIPELINE_PID=$!
 wait_for_pipeline
 
 echo "Starting bag playback: $BAG_PATH"
-ros2 bag play -i "$BAG_PATH" mcap --loop --rate 0.1 --disable-keyboard-controls --clock \
-     --remap /tf:=/tf_old /tf_static:=/tf_static_old \
-     > /tmp/exo_head_slam_bag.log 2>&1 &
+ros2 bag play -i "$BAG_PATH" mcap --loop --rate 0.3 --disable-keyboard-controls --clock &
+     #--remap /tf:=/tf_old /tf_static:=/tf_static_old &
 BAG_PID=$!
 
 # Launch RViz with pre-configured displays
