@@ -7,6 +7,8 @@ import numpy as np
 import cv2
 import uuid
 import os
+import threading
+from queue import Queue, Empty, Full
 from typing import List, Optional
 from .utils.vision_utils import apply_semantic_mask
 
@@ -84,6 +86,7 @@ class SemanticMaskerNode(Node):
         self.declare_parameter('masker.model_path', 'yolov8n-seg.pt')
         self.declare_parameter('masker.conf_threshold', 0.25)
         self.declare_parameter('masker.dynamic_classes', [0])
+        self.declare_parameter('sync_slop', 0.035)
         
         self.input_rgb_topic = self.get_parameter('input_rgb_topic').value
         self.input_depth_topic = self.get_parameter('input_depth_topic').value
@@ -109,10 +112,15 @@ class SemanticMaskerNode(Node):
         self.rgb_sub = message_filters.Subscriber(self, Image, self.input_rgb_topic, qos_profile=qos)
         self.depth_sub = message_filters.Subscriber(self, Image, self.input_depth_topic, qos_profile=qos)
         
+        sync_slop = self.get_parameter('sync_slop').value
         self.ts = message_filters.ApproximateTimeSynchronizer(
-            [self.rgb_sub, self.depth_sub], queue_size=30, slop=0.05
+            [self.rgb_sub, self.depth_sub], queue_size=30, slop=sync_slop
         )
         self.ts.registerCallback(self.callback)
+        
+        self.queue = Queue(maxsize=5)
+        self.worker_thread = threading.Thread(target=self.inference_loop, daemon=True)
+        self.worker_thread.start()
         
         domain_id = os.environ.get('ROS_DOMAIN_ID', '0')
         self.get_logger().info(f"[{self.instance_id}] Masker online. DOMAIN_ID={domain_id}")
@@ -127,26 +135,45 @@ class SemanticMaskerNode(Node):
                 return
 
         try:
-            rgb_image = self.bridge.imgmsg_to_cv2(rgb_msg, desired_encoding='bgr8').copy()
-            depth_image = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='passthrough').copy()
-            
-            mask = self.model.predict(rgb_image)
-            masked_rgb = apply_semantic_mask(rgb_image, mask)
-            
-            masked_depth = depth_image.copy()
-            masked_depth[mask > 0] = 0
-            
-            rgb_out = self.bridge.cv2_to_imgmsg(masked_rgb, encoding='bgr8')
-            depth_out = self.bridge.cv2_to_imgmsg(masked_depth, encoding=depth_msg.encoding)
-            
-            rgb_out.header = rgb_msg.header
-            depth_out.header = depth_msg.header
-            
-            self.masked_rgb_pub.publish(rgb_out)
-            self.masked_depth_pub.publish(depth_out)
-            
-        except Exception as e:
-            self.get_logger().error(f"[{self.instance_id}] Error: {str(e)}")
+            self.queue.put_nowait((rgb_msg, depth_msg))
+        except Full:
+            try:
+                self.queue.get_nowait()
+            except Empty:
+                pass
+            try:
+                self.queue.put_nowait((rgb_msg, depth_msg))
+            except Full:
+                pass
+
+    def inference_loop(self):
+        while rclpy.ok():
+            try:
+                rgb_msg, depth_msg = self.queue.get(timeout=0.1)
+            except Empty:
+                continue
+
+            try:
+                rgb_image = self.bridge.imgmsg_to_cv2(rgb_msg, desired_encoding='bgr8').copy()
+                depth_image = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='passthrough').copy()
+                
+                mask = self.model.predict(rgb_image)
+                masked_rgb = apply_semantic_mask(rgb_image, mask)
+                
+                masked_depth = depth_image.copy()
+                masked_depth[mask > 0] = 0
+                
+                rgb_out = self.bridge.cv2_to_imgmsg(masked_rgb, encoding='bgr8')
+                depth_out = self.bridge.cv2_to_imgmsg(masked_depth, encoding=depth_msg.encoding)
+                
+                rgb_out.header = rgb_msg.header
+                depth_out.header = depth_msg.header
+                
+                self.masked_rgb_pub.publish(rgb_out)
+                self.masked_depth_pub.publish(depth_out)
+                
+            except Exception as e:
+                self.get_logger().error(f"[{self.instance_id}] Error: {str(e)}")
 
 def main(args=None):
     rclpy.init(args=args)
