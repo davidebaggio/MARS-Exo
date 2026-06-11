@@ -54,6 +54,7 @@ wait_for_pipeline
 
 echo "Starting bag playback: $BAG_PATH"
 ros2 bag play -i "$BAG_PATH" mcap --loop --rate 0.1 --disable-keyboard-controls --clock \
+     --remap /tf:=/tf_old /tf_static:=/tf_static_old \
      > /tmp/exo_head_slam_bag.log 2>&1 &
 BAG_PID=$!
 
