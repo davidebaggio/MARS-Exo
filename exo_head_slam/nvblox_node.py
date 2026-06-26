@@ -78,6 +78,11 @@ class NvbloxNode(Node):
             history=HistoryPolicy.KEEP_LAST,
             depth=100
         )
+        pub_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10
+        )
 
         self.head_depth_sub = message_filters.Subscriber(self, Image, self.head_depth_topic, qos_profile=qos)
         self.head_rgb_sub = message_filters.Subscriber(self, Image, self.head_rgb_topic, qos_profile=qos)
@@ -101,9 +106,9 @@ class NvbloxNode(Node):
         )
         self.exo_ts.registerCallback(self.exo_callback)
 
-        self.mesh_pub = self.create_publisher(Marker, '/nvblox/mesh', qos)
-        self.pcl_pub = self.create_publisher(PointCloud2, '/nvblox/pointcloud', qos)
-        self.costmap_pub = self.create_publisher(OccupancyGrid, '/nvblox/costmap', qos)
+        self.mesh_pub = self.create_publisher(Marker, '/nvblox/mesh', pub_qos)
+        self.pcl_pub = self.create_publisher(PointCloud2, '/nvblox/pointcloud', pub_qos)
+        self.costmap_pub = self.create_publisher(OccupancyGrid, '/nvblox/costmap', pub_qos)
 
         self.get_logger().info(f'[{self.instance_id}] NVBlox node online.')
         self.get_logger().info(f'  -> Voxel size: {self.voxel_size_m}m')

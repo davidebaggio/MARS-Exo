@@ -51,8 +51,13 @@ class DepthPreprocessorNode(Node):
             history=HistoryPolicy.KEEP_LAST,
             depth=100
         )
+        pub_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10
+        )
         self.depth_sub = self.create_subscription(Image, self.input_depth_topic, self.depth_callback, qos)
-        self.filtered_depth_pub = self.create_publisher(Image, self.output_depth_topic, qos)
+        self.filtered_depth_pub = self.create_publisher(Image, self.output_depth_topic, pub_qos)
 
         self.get_logger().info(f'Depth preprocessor "{self.get_name()}" online.')
         self.get_logger().info(f'  -> Sub: {self.input_depth_topic}')
