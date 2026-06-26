@@ -28,6 +28,7 @@ exo_nvblox:
     depth_topic: "/exo/masked/depth_raw"
     rgb_topic: "/exo/masked/image_raw"
     camera_info_topic: "/camera/exo/color/camera_info"
+    exo_frame_id: "exo_link"
 
 extrinsic_solver:
   ros__parameters:
@@ -35,6 +36,7 @@ extrinsic_solver:
 
 exo_rtabmap:
   ros__parameters:
+    database_path: "~/.ros/rtabmap_exo.db"
     subscribe_depth: true
     frame_id: "exo_link"
     map_frame_id: "map"

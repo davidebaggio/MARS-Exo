@@ -1,0 +1,24 @@
+=============================================
+      EXTRINSIC CALIBRATION METRICS SUMMARY
+=============================================
+Total synced frames:  283
+Direct Match success: 224 (79.2%)
+SLAM Fallback success: 45 (15.9%)
+Solver failures:      14 (4.9%)
+Fallback reliance:    16.7% of successful frames
+---------------------------------------------
+    INTER-AGENT DISTANCE & MAP CONSISTENCY
+---------------------------------------------
+Estimated Camera-to-Camera Distance:
+  Mean Distance:    0.6836 m
+  Std Dev (Jitter): 0.2143 m
+---------------------------------------------
+    VARIANCE BY SOLVER MODE
+Direct Match (SUCCESS) (224 frames):
+  Var(t_x): 0.008187  Var(t_y): 0.004554  Var(t_z): 0.002803
+  Avg Variance: 0.005182
+    VARIANCE BY SOLVER MODE
+SLAM Fallback (SUCCESS_SLAM_FALLBACK) (45 frames):
+  Var(t_x): 0.195554  Var(t_y): 0.160924  Var(t_z): 0.066557
+  Avg Variance: 0.141012
+=============================================

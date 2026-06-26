@@ -47,14 +47,16 @@ if [ -d "install/exo_head_slam/lib/exo_head_slam" ]; then
     sed -i "1s|^#!.*python.*|#!$(which python3)|" install/exo_head_slam/lib/exo_head_slam/*
 fi
 
+# Prepend system library paths to avoid miniconda library conflicts (e.g., fastcdr symbol lookup errors)
+export LD_LIBRARY_PATH="/opt/ros/jazzy/lib:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+
 ros2 launch exo_head_slam main_pipeline_launch.py use_sim_time:=true publish_debug_pcl:=false global_frame:=odom &
 PIPELINE_PID=$!
 
 wait_for_pipeline
 
 echo "Starting bag playback: $BAG_PATH"
-ros2 bag play -i "$BAG_PATH" mcap --loop --rate 0.3 --disable-keyboard-controls --clock &
-     #--remap /tf:=/tf_old /tf_static:=/tf_static_old &
+ros2 bag play -i "$BAG_PATH" mcap --rate 0.6 --disable-keyboard-controls --clock &
 BAG_PID=$!
 
 # Launch RViz with pre-configured displays

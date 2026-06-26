@@ -35,6 +35,8 @@ class NvbloxNode(Node):
         self.declare_parameter('exo_depth_topic', '/exo/masked/depth_raw')
         self.declare_parameter('exo_rgb_topic', '/exo/masked/image_raw')
         self.declare_parameter('exo_camera_info_topic', '/camera/exo/color/camera_info')
+        self.declare_parameter('head_frame_id', 'head_link')
+        self.declare_parameter('exo_frame_id', 'exo_link')
 
         self.global_frame = self.get_parameter('global_frame').value
         self.voxel_size_m = float(self.get_parameter('voxel_size_m').value)
@@ -50,6 +52,8 @@ class NvbloxNode(Node):
         self.exo_depth_topic = self.get_parameter('exo_depth_topic').value
         self.exo_rgb_topic = self.get_parameter('exo_rgb_topic').value
         self.exo_camera_info_topic = self.get_parameter('exo_camera_info_topic').value
+        self.head_frame_id = str(self.get_parameter('head_frame_id').value)
+        self.exo_frame_id = str(self.get_parameter('exo_frame_id').value)
 
         self.bridge = CvBridge()
         self.tf_buffer = tf2_ros.Buffer()
@@ -124,31 +128,76 @@ class NvbloxNode(Node):
         width, height = info_msg.width, info_msg.height
         return Sensor.from_camera(fu=fx, fv=fy, cu=cx, cv=cy, width=width, height=height)
 
-    def _get_pose(self, frame_id: str, stamp) -> torch.Tensor:
-        try:
-            transform = self.tf_buffer.lookup_transform(
-                self.global_frame,
-                frame_id,
-                stamp,
-                rclpy.duration.Duration(seconds=0.5)
-            )
-        except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as e:
-            self.get_logger().warn(f'TF lookup failed for {frame_id}: {str(e)}', throttle_duration_sec=10.0)
-            return None
-        except Exception as e:
-            self.get_logger().error(f'Unexpected TF error: {str(e)}')
-            return None
-
+    @staticmethod
+    def _tf_to_matrix(transform) -> np.ndarray:
         q = [transform.transform.rotation.x, transform.transform.rotation.y,
              transform.transform.rotation.z, transform.transform.rotation.w]
         t = [transform.transform.translation.x, transform.transform.translation.y,
              transform.transform.translation.z]
-
         rot = R.from_quat(q).as_matrix()
         pose = np.eye(4, dtype=np.float32)
         pose[:3, :3] = rot
         pose[:3, 3] = t
-        return torch.from_numpy(pose)
+        return pose
+
+    def _lookup(self, target_frame: str, source_frame: str, stamp) -> any:
+        try:
+            return self.tf_buffer.lookup_transform(
+                target_frame, source_frame, stamp,
+                rclpy.duration.Duration(seconds=0.5)
+            )
+        except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException):
+            return None
+
+    def _get_pose(self, frame_id: str, stamp) -> torch.Tensor:
+        tf = self._lookup(self.global_frame, frame_id, stamp)
+        if tf is None:
+            tf = self._lookup(self.global_frame, frame_id, rclpy.time.Time())
+        if tf is None:
+            self.get_logger().warn(f'TF lookup failed for {frame_id}', throttle_duration_sec=2.0)
+            return None
+        return torch.from_numpy(self._tf_to_matrix(tf))
+
+    def _get_head_pose(self, depth_frame_id: str, stamp) -> torch.Tensor:
+        # Primary: exo SLAM (map -> exo_link) + extrinsic solver (exo_link -> head_link)
+        T_map_exo = self._lookup(self.global_frame, self.exo_frame_id, stamp)
+        if T_map_exo is None:
+            T_map_exo = self._lookup(self.global_frame, self.exo_frame_id, rclpy.time.Time())
+
+        if T_map_exo is not None:
+            T_exo_head = self._lookup(self.exo_frame_id, self.head_frame_id, stamp)
+            if T_exo_head is None:
+                T_exo_head = self._lookup(self.exo_frame_id, self.head_frame_id, rclpy.time.Time())
+
+            if T_exo_head is not None:
+                T_head_cam = self._lookup(self.head_frame_id, depth_frame_id, stamp)
+                if T_head_cam is None:
+                    T_head_cam = self._lookup(self.head_frame_id, depth_frame_id, rclpy.time.Time())
+
+                if T_head_cam is not None:
+                    T_map_exo_mat = self._tf_to_matrix(T_map_exo)
+                    T_exo_head_mat = self._tf_to_matrix(T_exo_head)
+                    T_head_cam_mat = self._tf_to_matrix(T_head_cam)
+                    return torch.from_numpy(T_map_exo_mat @ T_exo_head_mat @ T_head_cam_mat)
+
+        # Fallback: head SLAM (map -> head_link) when extrinsics are unavailable
+        T_map_head = self._lookup(self.global_frame, self.head_frame_id, stamp)
+        if T_map_head is None:
+            T_map_head = self._lookup(self.global_frame, self.head_frame_id, rclpy.time.Time())
+
+        if T_map_head is not None:
+            T_head_cam = self._lookup(self.head_frame_id, depth_frame_id, stamp)
+            if T_head_cam is None:
+                T_head_cam = self._lookup(self.head_frame_id, depth_frame_id, rclpy.time.Time())
+
+            if T_head_cam is not None:
+                self.get_logger().info('Head pose: using fallback (head SLAM)', throttle_duration_sec=5.0)
+                T_map_head_mat = self._tf_to_matrix(T_map_head)
+                T_head_cam_mat = self._tf_to_matrix(T_head_cam)
+                return torch.from_numpy(T_map_head_mat @ T_head_cam_mat)
+
+        self.get_logger().warn(f'Could not compute head pose', throttle_duration_sec=5.0)
+        return None
 
     def _integrate_frame(self, depth_msg: Image, rgb_msg: Image, info_msg: CameraInfo, sensor_attr: str):
         try:
@@ -162,7 +211,10 @@ class NvbloxNode(Node):
                 sensor = self._create_sensor(info_msg)
                 setattr(self, sensor_attr, sensor)
 
-            pose = self._get_pose(depth_msg.header.frame_id, depth_msg.header.stamp)
+            if sensor_attr == 'head_sensor':
+                pose = self._get_head_pose(depth_msg.header.frame_id, depth_msg.header.stamp)
+            else:
+                pose = self._get_pose(depth_msg.header.frame_id, depth_msg.header.stamp)
             if pose is None:
                 return
 

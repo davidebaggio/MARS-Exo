@@ -13,6 +13,16 @@ extrinsic_solver:
     exo_frame_id: "exo_link"
     min_3d_matches: 15
     tf_filter_alpha: 0.5
+    max_trans_jump: 0.5
+    max_rot_jump: 0.8
+    freeze_timeout: 2.0
+    recovery_alpha: 0.02
+    use_slam_fallback: true
+    prefilter_distance_threshold: 0.5
+    min_translation_norm: 0.2
+    max_translation_norm: 2.2
+    min_relative_z: 0.1
+    max_relative_z: 1.5
     metrics_enabled: true
     metrics_csv_path: "extrinsic_metrics.csv"
     gt_parent_frame: ""

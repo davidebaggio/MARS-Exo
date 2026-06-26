@@ -25,16 +25,46 @@ head_semantic_masker:
 
 head_rtabmap:
   ros__parameters:
+    database_path: "~/.ros/rtabmap_head.db"
     subscribe_depth: true
     frame_id: "head_link"
+    map_frame_id: "map"
+    odom_frame_id: "odom_head"
+    publish_tf: true
     approx_sync: true
     approx_sync_max_interval: 0.02
-    wait_for_transform: 0.2
+    queue_size: 100
+    sync_queue_size: 100
+    wait_for_transform: 1.0
+    subscribe_odom_info: true
     rgb_topic: "/head/masked/image_raw"
     depth_topic: "/head/masked/depth_raw"
     camera_info_topic: "/camera/head/color/camera_info"
-    RGBD/CreateOccupancyGrid: false
-    Grid/FromDepth: false
+    RGBD/CreateOccupancyGrid: "false"
+    Grid/FromDepth: "false"
+    Odom/Strategy: "0"
+    Vis/EstimationType: "0"
+    Vis/MinInliers: "6"
+    Vis/InlierDistance: "0.1"
+    Vis/CorGuessWinSize: "0"
+    Vis/FeatureType: "8"
+    Vis/MaxFeatures: "1000"
+    Rtabmap/DetectionRate: "0"
+    RGBD/LinearUpdate: "0.01"
+    RGBD/AngularUpdate: "0.01"
+    RGBD/OptimizeMaxError: "0.1"
+
+
+head_rgbd_odometry:
+  ros__parameters:
+    publish_tf: true
+    frame_id: "head_link"
+    odom_frame_id: "odom_head"
+    approx_sync: true
+    approx_sync_max_interval: 0.02
+    matcher_type: "lightglue"
+    lightglue_device: "cuda"
+    lightglue_max_keypoints: 2048
 
 
 head_nvblox:
@@ -49,3 +79,4 @@ head_nvblox:
     depth_topic: "/head/masked/depth_raw"
     rgb_topic: "/head/masked/image_raw"
     camera_info_topic: "/camera/head/color/camera_info"
+    head_frame_id: "head_link"

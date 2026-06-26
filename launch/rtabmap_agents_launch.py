@@ -30,9 +30,13 @@ def generate_launch_description():
     config_dir = os.path.join(pkg_share, 'config')
     
     exo_config_path = os.path.join(config_dir, 'exo.yaml')
+    head_config_path = os.path.join(config_dir, 'head.yaml')
     
     exo_params = load_section(exo_config_path, 'exo_rtabmap')
     exo_odom_params = load_section(exo_config_path, 'exo_rgbd_odometry')
+    
+    head_params = load_section(head_config_path, 'head_rtabmap')
+    head_odom_params = load_section(head_config_path, 'head_rgbd_odometry')
     
     # Base parameters for all nodes
     base_params = {
@@ -42,12 +46,12 @@ def generate_launch_description():
         'qos_camera_info': 2,
     }
 
-    # Exo Fallback Visual Odometry Node (Python)
+    # Exo Visual Odometry Node (Python Fallback)
     exo_odometry = Node(
         package='exo_head_slam',
         executable='fallback_vo',
         name='exo_rgbd_odometry',
-        parameters=[{**base_params, **exo_params, **exo_odom_params}],
+        parameters=[{**base_params, **exo_odom_params}],
         remappings=[
             ('rgb/image', exo_params['rgb_topic']),
             ('depth/image', exo_params['depth_topic']),
@@ -73,9 +77,42 @@ def generate_launch_description():
         output='screen'
     )
 
+    # Head Visual Odometry Node (Python Fallback)
+    head_odometry = Node(
+        package='exo_head_slam',
+        executable='fallback_vo',
+        name='head_rgbd_odometry',
+        parameters=[{**base_params, **head_odom_params}],
+        remappings=[
+            ('rgb/image', head_params['rgb_topic']),
+            ('depth/image', head_params['depth_topic']),
+            ('rgb/camera_info', head_params['camera_info_topic']),
+            ('odom', '/head/odom'),
+        ],
+        output='screen'
+    )
+
+    # SLAM Node (Head)
+    head_rtabmap = Node(
+        package='rtabmap_slam',
+        executable='rtabmap',
+        name='head_rtabmap',
+        parameters=[{**base_params, **head_params}],
+        remappings=[
+            ('rgb/image', head_params['rgb_topic']),
+            ('depth/image', head_params['depth_topic']),
+            ('rgb/camera_info', head_params['camera_info_topic']),
+            ('odom', '/head/odom'),
+        ],
+        arguments=['-d'],
+        output='screen'
+    )
+
     return LaunchDescription([
         use_sim_time_arg,
         exo_odometry,
         exo_rtabmap,
+        head_odometry,
+        head_rtabmap,
     ])
 

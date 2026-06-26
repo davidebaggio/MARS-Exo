@@ -9,8 +9,8 @@ The package cleans the depth, removes dynamic objects, estimates the rigid trans
 The goal is to produce a **single fused 3D map** in a shared coordinate system. 
 
 To achieve this, the pipeline separates the concerns of pose tracking and 3D reconstruction:
-* **RTAB-Map** runs on the **Exo camera** stream. It uses `rgbd_odometry` (via the python `fallback_vo` node) to track the robot's movement and the SLAM node to broadcast the `map -> odom -> exo_link` TF.
-* **The Extrinsic Solver** dynamically calculates and broadcasts the spatial link between the cameras (**`exo_link -> head_link`** TF).
+* **RTAB-Map** runs on both the **Exo camera** and **Head camera** streams. It runs dual visual odometry and SLAM nodes to track each camera in a shared global `map` frame (publishing `map -> odom -> exo_link` and `map -> odom_head -> head_link_slam`).
+* **The Extrinsic Solver** dynamically calculates and broadcasts the relative spatial link between the cameras (**`exo_link -> head_link`** TF). It uses direct 2D-to-3D feature matching as the primary tracker and automatically falls back to SLAM-pose-based calibration when direct matching fails.
 * **NVBlox** consumes the combined TF tree and the depth streams from both cameras to perform real-time volumetric TSDF fusion into a single global map.
 
 ## Data Flow Overview
@@ -30,15 +30,22 @@ flowchart TD
     A3 --> C2
 
     %% Tracking & Extrinsics
-    C2 --> D_ODO[RTAB-Map Visual Odometry]
-    D_ODO --> |Publishes TF: odom -> exo| TF_TREE((TF Tree))
+    C2 --> D_ODO[Exo Visual Odometry]
+    D_ODO --> |Publishes TF: odom -> exo_link| TF_TREE((TF Tree))
     
-    C2 --> D_SLAM[RTAB-Map SLAM Node]
+    C2 --> D_SLAM[Exo SLAM Node]
     D_SLAM --> |Publishes TF: map -> odom| TF_TREE
+    
+    C1 --> H_ODO[Head Visual Odometry]
+    H_ODO --> |Publishes TF: odom_head -> head_link_slam| TF_TREE
+    
+    C1 --> H_SLAM[Head SLAM Node]
+    H_SLAM --> |Publishes TF: map -> odom_head| TF_TREE
     
     C1 --> F[Extrinsic Solver]
     C2 --> F
-    F --> |Publishes TF: exo -> head| TF_TREE
+    TF_TREE -. Fallback Poses .-> F
+    F --> |Publishes TF: exo_link -> head_link| TF_TREE
 
     %% Fusion
     C1 -. Masked Depth .-> N[Single NVBlox Node]
@@ -72,29 +79,36 @@ This stage removes dynamic objects from the RGB and depth images. People and mov
 ### Current Behavior
 The semantic masker relies on a detector-backed masking step (e.g., YOLOv8 via Ultralytics). It zeros out masked pixels in both the RGB and Depth images.
 
-## 3. Pose Tracking (RTAB-Map)
+## 3. Dual-SLAM Pose Tracking (RTAB-Map)
 
-The system uses a combination of Visual Odometry and SLAM on the **Exo camera** stream to localize the entire agent within the world.
+The system uses parallel tracking pipelines in the shared `map` frame to localize both the exoskeleton base and the head camera.
 
 ### Purpose
-* Provide robust Visual Odometry (VO) and loop closure.
-* Calculate the camera's metric pose in the global frame.
-* Publish the `map -> odom -> exo_link` TF transform.
+* Provide robust Visual Odometry (VO) and loop closure for both sensors.
+* Maintain separate localization trees (`map -> odom -> exo_link` and `map -> odom_head -> head_link_slam`) to avoid circular TF dependencies.
+* Provide continuous pose estimates for the SLAM-based extrinsic calibration fallback.
 
 ### Current Behavior
-* **`exo_rgbd_odometry`** (via `fallback_vo` node): Calculates motion between frames using the Exo camera's masked RGB-D stream. Publishes the `odom -> exo_link` transform.
-* **`exo_rtabmap`**: Performs SLAM, loop closure detection, and publishes the `map -> odom` transform. Dense mapping is disabled as NVBlox handles 3D reconstruction.
+* **Exo Tracking:**
+  * **`exo_rgbd_odometry`** (via `fallback_vo` node): Computes visual odometry for the Exo camera, publishing the `odom -> exo_link` TF.
+  * **`exo_rtabmap`**: Runs SLAM on the Exo camera, publishing the `map -> odom` TF.
+* **Head Tracking:**
+  * **`head_rgbd_odometry`** (via `fallback_vo` node): Computes visual odometry for the Head camera, publishing the `odom_head -> head_link_slam` TF.
+  * **`head_rtabmap`**: Runs SLAM on the Head camera, publishing the `map -> odom_head` TF.
 
-## 4. 3D-to-3D Extrinsic Calibration
+## 4. 3D-to-3D Extrinsic Calibration & SLAM Fallback
 
 The extrinsic solver estimates the rigid transform between the exo camera and the head camera.
 
 ### Purpose
 * Align the two camera frames in SE(3).
 * Broadcast the resulting transform as a TF frame (**`exo_link -> head_link`**).
+* **Fallback Tracking:** Gracefully fall back to SLAM-pose-based calibration when 2D matching fails due to low FOV overlap or rapid movement.
 
 ### Current Behavior
-The solver extracts 2D feature correspondences between Exo and Head views using a configurable matcher (`orb` or `lightglue`), deprojects matched pixels into 3D points, and estimates the rigid transform. It broadcasts the transform from the Exo base link `exo_link` (parent) to the Head base link `head_link` (child).
+1. **Direct 2D-3D Matching:** The solver extracts feature correspondences between Exo and Head views using a configurable matcher (`orb` or `lightglue`), deprojects matches to 3D, and estimates the transform via RANSAC/SVD.
+2. **SLAM Pose Fallback:** If direct matching fails, the solver queries TF2 for the relative transform between `exo_link` and `head_link_slam` (which are both aligned to the shared `map` frame).
+3. **EMA Filter:** The computed transform is smoothed using an Exponential Moving Average (EMA) filter and broadcasted as `exo_link -> head_link`.
 
 ## 5. Volumetric Fusion (NVBlox)
 
@@ -122,7 +136,7 @@ The top-level entry point is `launch/main_pipeline_launch.py`. It starts:
 * Two depth preprocessing nodes.
 * Two semantic masking nodes.
 * One extrinsic solver node.
-* **Two** RTAB-Map nodes for the Exo camera (Odometry + SLAM).
+* **Four** RTAB-Map tracking nodes (2 for Exo: Odometry + SLAM, and 2 for Head: Odometry + SLAM).
 * **One** NVBlox node (Global fusion).
 
 ## Runtime Assumptions
@@ -130,3 +144,12 @@ The top-level entry point is `launch/main_pipeline_launch.py`. It starts:
 * Depth images are aligned to color.
 * The two camera streams are roughly time-synchronized.
 * Camera calibration data is available through `camera_info` topics.
+
+## 6. Evaluation Metrics
+
+System performance is analyzed offline using the `plot_metrics.py` tool, which processes the output `extrinsic_metrics.csv` to track:
+* **Match Statistics:** 2D matches, 3D deprojected matches, and RANSAC inliers.
+* **Solver Quality:** RANSAC RMSE and inlier ratios.
+* **Accuracy vs. Ground Truth:** Split translation and rotation errors for both Direct Match and SLAM Fallback modes.
+* **System Robustness:** Fallback Reliance Rate (percentage of successful frames utilizing SLAM fallback).
+* **Inter-Agent Map Consistency:** Mean and standard deviation (jitter) of the computed camera-to-camera distance over time to measure SLAM drift.

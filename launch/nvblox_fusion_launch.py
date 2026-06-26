@@ -49,6 +49,8 @@ def generate_launch_description():
         'exo_depth_topic': exo_params['depth_topic'],
         'exo_rgb_topic': exo_params['rgb_topic'],
         'exo_camera_info_topic': exo_params['camera_info_topic'],
+        'head_frame_id': head_params.get('head_frame_id', 'head_link'),
+        'exo_frame_id': exo_params.get('exo_frame_id', 'exo_link'),
         'use_sim_time': use_sim_time,
     }
 

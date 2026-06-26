@@ -4,7 +4,8 @@ from sensor_msgs.msg import Image, CameraInfo, PointCloud2, PointField
 from cv_bridge import CvBridge
 import numpy as np
 import message_filters
-# ponytail: Removed tf2_ros and scipy.spatial.transform dependencies
+import tf2_ros
+from scipy.spatial.transform import Rotation as R
 
 
 class PointCloudPublisherNode(Node):
@@ -30,7 +31,8 @@ class PointCloudPublisherNode(Node):
             return
 
         self.bridge = CvBridge()
-        # ponytail: Removed tf buffer/listener to prevent Python TF lookup failures
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
 
         # Sync subscribers
@@ -106,21 +108,42 @@ class PointCloudPublisherNode(Node):
             y = (v - cy) * z / fy
             points_cam = np.vstack((x, y, z)).T 
 
-            # ponytail: Use points directly in the local camera frame without Python TF lookups
-            points_local = points_cam
+            # Transform points from camera optical frame to global frame
+            output_frame = self.global_frame
+            tf = None
+            for lookup_time, label in [(depth_msg.header.stamp, 'exact'), (rclpy.time.Time(), 'latest')]:
+                try:
+                    tf = self.tf_buffer.lookup_transform(
+                        self.global_frame,
+                        depth_msg.header.frame_id,
+                        lookup_time,
+                        timeout=rclpy.duration.Duration(seconds=0.2)
+                    )
+                    break
+                except Exception as e:
+                    self.get_logger().debug(f"TF lookup ({label}) {depth_msg.header.frame_id} -> {self.global_frame}: {str(e)}")
+            
+            if tf is not None:
+                t = np.array([tf.transform.translation.x, tf.transform.translation.y, tf.transform.translation.z])
+                R_mat = R.from_quat([tf.transform.rotation.x, tf.transform.rotation.y, tf.transform.rotation.z, tf.transform.rotation.w]).as_matrix()
+                points_global = (R_mat @ points_cam.T).T + t
+            else:
+                self.get_logger().warn(f"TF lookup failed for {depth_msg.header.frame_id} -> {self.global_frame}, publishing in camera frame")
+                points_global = points_cam
+                output_frame = depth_msg.header.frame_id
 
 
             # 6. Create PointCloud2 (Packed XYZRGB)
-            num_points = len(points_local)
+            num_points = len(points_global)
             data = np.zeros(num_points, dtype=[
                 ('x', np.float32),
                 ('y', np.float32),
                 ('z', np.float32),
                 ('rgb', np.uint32)
             ])
-            data['x'] = points_local[:, 0]
-            data['y'] = points_local[:, 1]
-            data['z'] = points_local[:, 2]
+            data['x'] = points_global[:, 0]
+            data['y'] = points_global[:, 1]
+            data['z'] = points_global[:, 2]
             
             # Pack RGB into uint32 (0x00RRGGBB)
             rgb_packed = (rgb[:, 0].astype(np.uint32) << 16) | \
@@ -129,8 +152,8 @@ class PointCloudPublisherNode(Node):
             data['rgb'] = rgb_packed
 
             pcl_msg = PointCloud2()
-            pcl_msg.header = rgb_msg.header
-            pcl_msg.header.frame_id = depth_msg.header.frame_id
+            pcl_msg.header.stamp = rgb_msg.header.stamp
+            pcl_msg.header.frame_id = output_frame
             pcl_msg.height = 1
             pcl_msg.width = num_points
             pcl_msg.is_dense = False
