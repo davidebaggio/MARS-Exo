@@ -13,3 +13,7 @@ extrinsic_solver:
     exo_frame_id: "exo_link"
     min_3d_matches: 15
     tf_filter_alpha: 0.5
+    metrics_enabled: true
+    metrics_csv_path: "extrinsic_metrics.csv"
+    gt_parent_frame: ""
+    gt_child_frame: ""

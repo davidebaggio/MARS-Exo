@@ -35,3 +35,7 @@ env/
 *.engine
 
 data
+
+*.png
+
+*.csv
