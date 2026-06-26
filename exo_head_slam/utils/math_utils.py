@@ -49,15 +49,16 @@ def compute_transform_svd(points_A: np.ndarray, points_B: np.ndarray) -> Tuple[n
 
     return R, t.reshape(3, 1)
 
-def compute_transform_ransac(points_A: np.ndarray, points_B: np.ndarray, threshold: float = 0.05, iterations: int = 100) -> Optional[np.ndarray]:
+def compute_transform_ransac(points_A: np.ndarray, points_B: np.ndarray, threshold: float = 0.05, iterations: int = 100) -> Tuple[Optional[np.ndarray], int, float]:
     """
     Finds best SE(3) transform using RANSAC.
     """
     if points_A.shape[0] < 3:
-        return None
+        return None, 0, 0.0
 
     best_inlier_count = 0
     best_transform = None
+    best_rmse = float('inf')
 
     for _ in range(iterations):
         # Sample 3 random points
@@ -77,10 +78,17 @@ def compute_transform_ransac(points_A: np.ndarray, points_B: np.ndarray, thresho
                     T = np.eye(4)
                     T[:3, :3] = R_best
                     T[:3, 3] = t_best.flatten()
+                    
+                    # Compute RMSE for inliers
+                    B_pred_best = (R_best @ points_A[inliers].T).T + t_best.T
+                    inlier_dist = np.linalg.norm(points_B[inliers] - B_pred_best, axis=1)
+                    rmse = np.sqrt(np.mean(inlier_dist**2))
+                    
                     best_transform = T
+                    best_rmse = rmse
                     
         except (ValueError, np.linalg.LinAlgError):
             continue
             
-    return best_transform
+    return best_transform, best_inlier_count, best_rmse
 

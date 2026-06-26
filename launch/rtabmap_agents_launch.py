@@ -16,8 +16,8 @@ def load_section(config_path: str, section: str) -> dict:
 
 def generate_launch_description():
     """
-    Launches a single RTAB-Map instance on the exo camera for VO/SLAM.
-    Dense mapping is disabled since NVBlox handles 3D reconstruction.
+    Launches dual RTAB-Map odometry and an EKF to fuse them.
+    A single RTAB-Map instance runs on the exo camera for SLAM.
     """
     use_sim_time_arg = DeclareLaunchArgument(
         'use_sim_time',
@@ -26,47 +26,48 @@ def generate_launch_description():
     )
     use_sim_time = LaunchConfiguration('use_sim_time')
 
-    config_dir = os.path.join(get_package_share_directory('exo_head_slam'), 'config')
-    config_path = os.path.join(config_dir, 'exo.yaml')
-    exo_params = load_section(config_path, 'exo_rtabmap')
-
-    # Base parameters for both odom and slam nodes
+    pkg_share = get_package_share_directory('exo_head_slam')
+    config_dir = os.path.join(pkg_share, 'config')
+    
+    exo_config_path = os.path.join(config_dir, 'exo.yaml')
+    
+    exo_params = load_section(exo_config_path, 'exo_rtabmap')
+    exo_odom_params = load_section(exo_config_path, 'exo_rgbd_odometry')
+    
+    # Base parameters for all nodes
     base_params = {
         'use_sim_time': use_sim_time,
         'qos_image': 2,
         'qos_depth': 2,
         'qos_camera_info': 2,
     }
-    
-    # Merge YAML params into runtime_params
-    runtime_params = {**base_params, **exo_params}
 
-    # Visual Odometry Node
+    # Exo Fallback Visual Odometry Node (Python)
     exo_odometry = Node(
-        package='rtabmap_odom',
-        executable='rgbd_odometry',
+        package='exo_head_slam',
+        executable='fallback_vo',
         name='exo_rgbd_odometry',
-        parameters=[runtime_params],
+        parameters=[{**base_params, **exo_params, **exo_odom_params}],
         remappings=[
             ('rgb/image', exo_params['rgb_topic']),
             ('depth/image', exo_params['depth_topic']),
             ('rgb/camera_info', exo_params['camera_info_topic']),
+            ('odom', '/exo/odom'),
         ],
-        arguments=['-d'],
         output='screen'
     )
 
-    # SLAM Node
+    # SLAM Node (Exo)
     exo_rtabmap = Node(
         package='rtabmap_slam',
         executable='rtabmap',
         name='exo_rtabmap',
-        parameters=[runtime_params],
+        parameters=[{**base_params, **exo_params}],
         remappings=[
             ('rgb/image', exo_params['rgb_topic']),
             ('depth/image', exo_params['depth_topic']),
             ('rgb/camera_info', exo_params['camera_info_topic']),
-            # ('odom', 'odom'), # Explicitly NOT remapping to favor TF if odom_frame_id is set
+            ('odom', '/exo/odom'),
         ],
         arguments=['-d'],
         output='screen'
@@ -77,3 +78,4 @@ def generate_launch_description():
         exo_odometry,
         exo_rtabmap,
     ])
+

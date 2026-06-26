@@ -29,6 +29,7 @@ setup(
             'semantic_masker = exo_head_slam.semantic_masker_node:main',
             'extrinsic_solver = exo_head_slam.extrinsic_solver_node:main',
             'pointcloud_publisher = exo_head_slam.pointcloud_publisher_node:main',
+            'fallback_vo = exo_head_slam.fallback_vo_node:main',
         ],
     },
 )

@@ -12,4 +12,4 @@ extrinsic_solver:
     head_frame_id: "head_link"
     exo_frame_id: "exo_link"
     min_3d_matches: 15
-    tf_filter_alpha: 0.1
+    tf_filter_alpha: 0.5

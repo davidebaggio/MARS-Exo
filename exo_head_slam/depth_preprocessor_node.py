@@ -4,18 +4,15 @@ from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 import numpy as np
 import cv2
-import uuid
 
 
 class DepthPreprocessorNode(Node):
     def __init__(self):
         super().__init__('depth_preprocessor_node')
-        self.instance_id = str(uuid.uuid4())[:8]
 
         # Declare parameters with strict defaults
         self.declare_parameter('input_depth_topic', 'UNDEFINED')
         self.declare_parameter('output_depth_topic', 'UNDEFINED')
-        self.declare_parameter('expected_frame_id', 'UNDEFINED')
         self.declare_parameter('depth_filter.enabled', True)
         self.declare_parameter('depth_filter.depth_unit_scale', 0.001)
         self.declare_parameter('depth_filter.spatial.kernel_size', 5)
@@ -27,10 +24,9 @@ class DepthPreprocessorNode(Node):
         # Get values
         self.input_depth_topic = self.get_parameter('input_depth_topic').value
         self.output_depth_topic = self.get_parameter('output_depth_topic').value
-        self.expected_frame_id = self.get_parameter('expected_frame_id').value
         
         if self.input_depth_topic == 'UNDEFINED' or self.output_depth_topic == 'UNDEFINED':
-            self.get_logger().error(f'[{self.instance_id}] CRITICAL: input_depth_topic or output_depth_topic not set!')
+            self.get_logger().error('CRITICAL: input_depth_topic or output_depth_topic not set!')
             return
 
         self.enabled = self.get_parameter('depth_filter.enabled').value
@@ -58,10 +54,9 @@ class DepthPreprocessorNode(Node):
         self.depth_sub = self.create_subscription(Image, self.input_depth_topic, self.depth_callback, qos)
         self.filtered_depth_pub = self.create_publisher(Image, self.output_depth_topic, qos)
 
-        self.get_logger().info(f'[{self.instance_id}] Depth preprocessor "{self.get_name()}" online.')
+        self.get_logger().info(f'Depth preprocessor "{self.get_name()}" online.')
         self.get_logger().info(f'  -> Sub: {self.input_depth_topic}')
         self.get_logger().info(f'  -> Pub: {self.output_depth_topic}')
-        self.get_logger().info(f'  -> Expect Frame: {self.expected_frame_id}')
 
     def to_meters(self, depth_image: np.ndarray, encoding: str) -> np.ndarray:
         depth_m = depth_image.astype(np.float32).copy()
@@ -113,11 +108,6 @@ class DepthPreprocessorNode(Node):
         return blended
 
     def depth_callback(self, msg: Image):
-        if self.expected_frame_id != 'UNDEFINED':
-            if self.expected_frame_id not in msg.header.frame_id:
-                self.get_logger().error(f"[{self.instance_id}] CROSSTALK: Got '{msg.header.frame_id}', expected '{self.expected_frame_id}' on {self.input_depth_topic}")
-                return
-
         try:
             cv_img = self.bridge.imgmsg_to_cv2(msg, desired_encoding='32FC1').copy()
             depth_m = self.to_meters(cv_img, msg.encoding)
@@ -129,7 +119,7 @@ class DepthPreprocessorNode(Node):
                 res = self.temporal_filter(res)
 
             if self._log_count % 30 == 0:
-                self.get_logger().info(f"[{self.instance_id}] Stats: min={np.min(res):.2f}, max={np.max(res):.2f}, mean={np.mean(res):.2f}")
+                self.get_logger().info(f"Stats: min={np.min(res):.2f}, max={np.max(res):.2f}, mean={np.mean(res):.2f}")
             self._log_count += 1
 
             self.previous_filtered = res.copy()
@@ -139,7 +129,7 @@ class DepthPreprocessorNode(Node):
             self.filtered_depth_pub.publish(out_msg)
 
         except Exception as e:
-            self.get_logger().error(f'[{self.instance_id}] Error: {str(e)}')
+            self.get_logger().error(f'Error: {str(e)}')
 
 
 def main(args=None):
