@@ -9,8 +9,8 @@ The package cleans the depth, removes dynamic objects, estimates the rigid trans
 The goal is to produce a **single fused 3D map** in a shared coordinate system. 
 
 To achieve this, the pipeline separates the concerns of pose tracking and 3D reconstruction:
-* **RTAB-Map** runs on the **Exo camera** stream. It uses `rgbd_odometry` to track the robot's movement and the SLAM node to broadcast the `map -> odom -> exo_camera_link` TF.
-* **The Extrinsic Solver** dynamically calculates and broadcasts the spatial link between the cameras (**`exo -> head`** TF).
+* **RTAB-Map** runs on the **Exo camera** stream. It uses `rgbd_odometry` (via the python `fallback_vo` node) to track the robot's movement and the SLAM node to broadcast the `map -> odom -> exo_link` TF.
+* **The Extrinsic Solver** dynamically calculates and broadcasts the spatial link between the cameras (**`exo_link -> head_link`** TF).
 * **NVBlox** consumes the combined TF tree and the depth streams from both cameras to perform real-time volumetric TSDF fusion into a single global map.
 
 ## Data Flow Overview
@@ -79,10 +79,10 @@ The system uses a combination of Visual Odometry and SLAM on the **Exo camera** 
 ### Purpose
 * Provide robust Visual Odometry (VO) and loop closure.
 * Calculate the camera's metric pose in the global frame.
-* Publish the `map -> odom -> exo_camera_link` TF transform required by NVBlox.
+* Publish the `map -> odom -> exo_link` TF transform.
 
 ### Current Behavior
-* **`exo_rgbd_odometry`**: Calculates motion between frames using the Exo camera's masked RGB-D stream. Publishes the `odom -> exo_camera_link` transform.
+* **`exo_rgbd_odometry`** (via `fallback_vo` node): Calculates motion between frames using the Exo camera's masked RGB-D stream. Publishes the `odom -> exo_link` transform.
 * **`exo_rtabmap`**: Performs SLAM, loop closure detection, and publishes the `map -> odom` transform. Dense mapping is disabled as NVBlox handles 3D reconstruction.
 
 ## 4. 3D-to-3D Extrinsic Calibration
@@ -91,10 +91,10 @@ The extrinsic solver estimates the rigid transform between the exo camera and th
 
 ### Purpose
 * Align the two camera frames in SE(3).
-* Broadcast the resulting transform as a TF frame (**`exo_camera_link -> head_camera_link`**).
+* Broadcast the resulting transform as a TF frame (**`exo_link -> head_link`**).
 
 ### Current Behavior
-The solver extracts 2D feature correspondences between Exo and Head views using a configurable matcher (`orb` or `lightglue`), deprojects matched pixels into 3D points, and estimates the rigid transform. It broadcasts the transform from the Exo camera (parent) to the Head camera (child).
+The solver extracts 2D feature correspondences between Exo and Head views using a configurable matcher (`orb` or `lightglue`), deprojects matched pixels into 3D points, and estimates the rigid transform. It broadcasts the transform from the Exo base link `exo_link` (parent) to the Head base link `head_link` (child).
 
 ## 5. Volumetric Fusion (NVBlox)
 
@@ -106,8 +106,8 @@ The final stage feeds the masked depth data into a **single** NVBlox node. NVBlo
 
 ### Current Behavior
 The unified NVBlox node subscribes to the masked depth topics of both cameras. 
-1. When an Exo depth frame arrives, NVBlox looks up the `map -> exo_camera_link` TF and integrates the voxels.
-2. When a Head depth frame arrives, NVBlox looks up the `map -> exo_camera_link -> head_camera_link` TF and integrates the voxels into the same map.
+1. When an Exo depth frame arrives, NVBlox looks up the `map -> odom -> exo_link -> exo_camera_link` TF and integrates the voxels.
+2. When a Head depth frame arrives, NVBlox looks up the `map -> odom -> exo_link -> head_link -> head_camera_link` TF and integrates the voxels into the same map.
 
 ## Configuration Layout
 

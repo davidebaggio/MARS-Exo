@@ -17,12 +17,12 @@ The system decouples **pose tracking** (handled by RTAB-Map) from **volumetric r
 
 ### 3. Pose Tracking (`rtabmap_agents_launch.py`)
 - **Action:** Localization of the primary agent.
-- **Logic:** RTAB-Map runs on the head camera stream to publish the `map -> odom -> head_camera_link` transform. Dense mapping is disabled within RTAB-Map to conserve resources.
+- **Logic:** RTAB-Map runs on the **exo camera** stream to publish the `map -> odom -> exo_link` transform (using visual odometry via `fallback_vo` and SLAM via `rtabmap`). Dense mapping is disabled within RTAB-Map to conserve resources.
 
 ### 4. Extrinsic Solver (`extrinsic_solver_node.py`)
 - **Action:** Estimates the spatial relationship between cameras.
 - **Logic:** Matches features between head and exo views using **LightGlue** (GPU) or **ORB** (CPU). Deprojects matches to 3D and solves for the rigid transform via RANSAC and SVD.
-- **Output:** Broadcasts the `head_camera_link -> exo_camera_link` TF.
+- **Output:** Broadcasts the `exo_link -> head_link` TF (configured via `exo_frame_id` and `head_frame_id`).
 
 ### 5. Volumetric Fusion (`nvblox_fusion_launch.py`)
 - **Action:** Global 3D mapping.
@@ -81,4 +81,4 @@ System behavior is defined across three YAML files in the `config/` directory:
 ## Development Conventions
 - **Nodes:** All ROS 2 nodes are implemented in Python within `exo_head_slam/`.
 - **Utilities:** Math and vision helper functions are centralized in `exo_head_slam/utils/`.
-- **TFs:** The system expects a standard `map -> odom -> head_camera_link` chain provided by the tracking backend.
+- **TFs:** The system expects a standard `map -> odom -> exo_link` chain provided by the tracking backend, with static TFs defining `exo_link -> exo_camera_link` and `head_link -> head_camera_link`, and the extrinsic solver publishing `exo_link -> head_link`.
