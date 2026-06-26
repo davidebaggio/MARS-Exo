@@ -130,7 +130,7 @@ class NvbloxNode(Node):
                 self.global_frame,
                 frame_id,
                 stamp,
-                rclpy.duration.Duration(seconds=0.1)
+                rclpy.duration.Duration(seconds=0.5)
             )
         except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as e:
             self.get_logger().warn(f'TF lookup failed for {frame_id}: {str(e)}', throttle_duration_sec=10.0)

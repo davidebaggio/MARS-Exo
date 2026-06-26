@@ -71,7 +71,7 @@ Visualization Manager:
       Value: true
     - Class: rviz_default_plugins/PointCloud2
       Color Transformer: RGB8
-      Enabled: true
+      Enabled: false
       Name: HeadDebugCloud
       Size (Pixels): 3
       Topic:
@@ -83,7 +83,7 @@ Visualization Manager:
       Value: true
     - Class: rviz_default_plugins/PointCloud2
       Color Transformer: RGB8
-      Enabled: true
+      Enabled: false
       Name: ExoDebugCloud
       Size (Pixels): 3
       Topic:

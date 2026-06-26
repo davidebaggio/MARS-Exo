@@ -157,7 +157,10 @@ def generate_launch_description():
             PythonLaunchDescriptionSource(
                 PathJoinSubstitution([pkg_share, 'launch', 'nvblox_fusion_launch.py'])
             ),
-            launch_arguments={'use_sim_time': use_sim_time}.items(),
+            launch_arguments={
+                'use_sim_time': use_sim_time,
+                'global_frame': global_frame
+            }.items(),
         )
     )
 

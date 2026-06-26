@@ -28,8 +28,15 @@ def generate_launch_description():
     head_params = load_section(head_config_path, 'head_nvblox')
     exo_params = load_section(exo_config_path, 'exo_nvblox')
 
+    global_frame_arg = DeclareLaunchArgument(
+        'global_frame',
+        default_value=head_params.get('global_frame', 'map'),
+        description='Global frame for voxel integration'
+    )
+    global_frame = LaunchConfiguration('global_frame')
+
     nvblox_params = {
-        'global_frame': head_params.get('global_frame', 'map'),
+        'global_frame': global_frame,
         'voxel_size_m': head_params.get('voxel_size_m', 0.05),
         'max_integration_distance_m': head_params.get('max_integration_distance_m', 5.0),
         'mesh_update_period': head_params.get('mesh_update_period', 10),
@@ -55,5 +62,6 @@ def generate_launch_description():
 
     return LaunchDescription([
         use_sim_time_arg,
+        global_frame_arg,
         nvblox_node,
     ])
