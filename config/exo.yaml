@@ -26,6 +26,7 @@ exo_semantic_masker:
 exo_nvblox:
   ros__parameters:
     depth_topic: "/exo/masked/depth_raw"
+    rgb_topic: "/exo/masked/image_raw"
     camera_info_topic: "/camera/exo/color/camera_info"
 
 extrinsic_solver:
@@ -43,6 +44,7 @@ exo_rtabmap:
     approx_sync: true
     approx_sync_max_interval: 0.02
     queue_size: 100
+    sync_queue_size: 100
     wait_for_transform: 0.2
     rgb_topic: "/exo/masked/image_raw"
     depth_topic: "/exo/masked/depth_raw"
@@ -74,7 +76,3 @@ exo_rgbd_odometry:
     matcher_type: "lightglue"
     lightglue_device: "cuda"
     lightglue_max_keypoints: 2048
-
-
-
-

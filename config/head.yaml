@@ -40,5 +40,12 @@ head_rtabmap:
 head_nvblox:
   ros__parameters:
     global_frame: "map"
+    voxel_size_m: 0.05
+    max_integration_distance_m: 5.0
+    mesh_update_period: 10
+    costmap_resolution: 0.1
+    costmap_height_min: 0.0
+    costmap_height_max: 1.0
     depth_topic: "/head/masked/depth_raw"
+    rgb_topic: "/head/masked/image_raw"
     camera_info_topic: "/camera/head/color/camera_info"

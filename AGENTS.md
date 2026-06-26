@@ -7,7 +7,7 @@ ROS 2 ament_python package — multi-agent RGB-D SLAM pipeline for head + exoske
 ## Build & Run
 
 ```bash
-colcon build --packages-select exo_head_slam --symlink-install
+make build
 source install/setup.bash
 ```
 
@@ -15,7 +15,7 @@ source install/setup.bash
 
 ### Critical: Python shebang fix
 
-After `colcon build`, the generated shim scripts in `install/exo_head_slam/lib/exo_head_slam/` hardcode `#!/usr/bin/python3`. If using a conda or venv, rewrite the shebangs to `$(which python3)` or nodes will run in the system Python and miss dependencies. `run.sh` does this automatically.
+After `colcon build`, the generated shim scripts in `install/exo_head_slam/lib/exo_head_slam/` hardcode `#!/usr/bin/python3`. If using a conda or venv, rewrite the shebangs to `$(which python3)` or nodes will run in the system Python and miss dependencies. Both `make build` and `run.sh` do this automatically.
 
 ## Nodes (entry points in setup.py)
 
@@ -24,11 +24,12 @@ After `colcon build`, the generated shim scripts in `install/exo_head_slam/lib/e
 | `depth_preprocessor` | `depth_preprocessor_node.py` | Spatial + temporal depth filtering |
 | `semantic_masker` | `semantic_masker_node.py` | YOLOv8-seg dynamic object removal |
 | `extrinsic_solver` | `extrinsic_solver_node.py` | 3D-to-3D SE(3) calibration (ORB or LightGlue) |
+| `nvblox_node` | `nvblox_node.py` | TSDF fusion using nvblox_torch (mesh + pointcloud + costmap) |
 
 ## Launch
 
 - **`launch/main_pipeline_launch.py`** — top-level entry point. Starts all 3 custom nodes + static TF publishers.
-- RTAB-Map (single head instance, VO mode) and NVBlox (single fusion node) are **optional** — the launch file checks if `rtabmap_slam` / `nvblox_ros` packages exist and skips them silently if not found.
+- RTAB-Map (single head instance, VO mode) is **optional** — the launch file checks if `rtabmap_slam` package exists and skips it silently if not found.
 
 ## Configuration
 
@@ -44,18 +45,18 @@ Changing topics, filter params, or matcher type requires only YAML edits.
 - `ultralytics>=8.0` (requirements.txt) — semantic masker falls back to empty mask if missing
 - `lightglue` + `superpoint` — extrinsic solver falls back to ORB if missing
 - `rtabmap_slam` ROS 2 package — head camera VO/SLAM, optional
-- `nvblox_ros` ROS 2 package — volumetric fusion, optional
+- `nvblox_torch` (pip) — used by custom nvblox_node for TSDF fusion
 
 ## Pipeline Data Flow
 
 ```
 Head RGB + depth → depth_preprocessor → semantic_masker → rtabmap (head VO, optional)
                                                      ↘
-Exo RGB + depth  → depth_preprocessor → semantic_masker → nvblox (single node, optional)
+Exo RGB + depth  → depth_preprocessor → semantic_masker → nvblox_node (TSDF fusion)
 
 semantic_masker (head+exo) → extrinsic_solver → TF head→exo
 rtabmap → TF map→head
-nvblox uses TF tree (map→head, map→head→exo) for fused TSDF
+nvblox_node uses TF tree (map→head, map→head→exo) for fused TSDF
 ```
 
 ## Gotchas

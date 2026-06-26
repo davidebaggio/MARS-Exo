@@ -47,9 +47,9 @@ class DepthPreprocessorNode(Node):
         # Subscribers and Publishers
         from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
         qos = QoSProfile(
-            reliability=ReliabilityPolicy.RELIABLE,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
-            depth=10
+            depth=100
         )
         self.depth_sub = self.create_subscription(Image, self.input_depth_topic, self.depth_callback, qos)
         self.filtered_depth_pub = self.create_publisher(Image, self.output_depth_topic, qos)

@@ -1,2 +1,3 @@
 ultralytics>=8.0
 scipy
+nvblox_torch
