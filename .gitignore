@@ -33,3 +33,5 @@ env/
 # Models
 *.pt
 *.engine
+
+data
