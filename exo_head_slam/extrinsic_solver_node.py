@@ -11,7 +11,7 @@ import csv
 import os
 from typing import Optional, Tuple
 from scipy.spatial.transform import Rotation as R
-from .utils.math_utils import compute_transform_ransac
+from .utils.math_utils import compute_transform_ransac, tf_to_matrix
 from .utils.vision_utils import get_3d_point
 
 from .utils.matchers import ORBMatcher, LightGlueMatcher
@@ -217,13 +217,6 @@ class ExtrinsicSolverNode(Node):
                             t_h_link_opt = self.tf_buffer.lookup_transform(self.head_frame_id, h_rgb.header.frame_id, h_rgb.header.stamp, timeout=rclpy.duration.Duration(seconds=0.1))
                             t_e_link_opt = self.tf_buffer.lookup_transform(self.exo_frame_id, e_rgb.header.frame_id, e_rgb.header.stamp, timeout=rclpy.duration.Duration(seconds=0.1))
                             
-                            def tf_to_matrix(tf):
-                                mat = np.eye(4)
-                                q = [tf.transform.rotation.x, tf.transform.rotation.y, tf.transform.rotation.z, tf.transform.rotation.w]
-                                mat[:3, :3] = R.from_quat(q).as_matrix()
-                                mat[:3, 3] = [tf.transform.translation.x, tf.transform.translation.y, tf.transform.translation.z]
-                                return mat
-
                             T_h_link_opt = tf_to_matrix(t_h_link_opt)
                             T_e_link_opt = tf_to_matrix(t_e_link_opt)
                         except Exception as e:
@@ -462,14 +455,6 @@ class ExtrinsicSolverNode(Node):
         if t_map_head is None:
             self.get_logger().warn(f"SLAM fallback: map -> {self.slam_fallback_child_frame} not found (head SLAM not publishing)")
             return None, None, fallback_status
-
-        # Compose: T_exo_head = inv(T_map_exo) * T_map_head
-        def tf_to_matrix(tf):
-            mat = np.eye(4)
-            q = [tf.transform.rotation.x, tf.transform.rotation.y, tf.transform.rotation.z, tf.transform.rotation.w]
-            mat[:3, :3] = R.from_quat(q).as_matrix()
-            mat[:3, 3] = [tf.transform.translation.x, tf.transform.translation.y, tf.transform.translation.z]
-            return mat
 
         T_map_exo = tf_to_matrix(t_map_exo)
         T_map_head = tf_to_matrix(t_map_head)

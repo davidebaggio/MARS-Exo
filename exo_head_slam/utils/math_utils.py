@@ -1,8 +1,20 @@
 import numpy as np
 from typing import Tuple, Optional
 import rclpy
+from scipy.spatial.transform import Rotation as R
 
 logger = rclpy.logging.get_logger('math_utils')
+
+def tf_to_matrix(tf) -> np.ndarray:
+    """
+    Converts a ROS geometry_msgs/Transform or TransformStamped to a 4x4 homogenous matrix.
+    """
+    mat = np.eye(4)
+    q = [tf.transform.rotation.x, tf.transform.rotation.y, tf.transform.rotation.z, tf.transform.rotation.w]
+    mat[:3, :3] = R.from_quat(q).as_matrix()
+    mat[:3, 3] = [tf.transform.translation.x, tf.transform.translation.y, tf.transform.translation.z]
+    return mat
+
 
 def compute_transform_svd(points_A: np.ndarray, points_B: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """

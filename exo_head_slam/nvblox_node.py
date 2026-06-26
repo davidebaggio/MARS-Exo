@@ -7,7 +7,6 @@ from cv_bridge import CvBridge
 import numpy as np
 import message_filters
 import tf2_ros
-import uuid
 import torch
 from scipy.spatial.transform import Rotation as R
 
@@ -16,11 +15,12 @@ from nvblox_torch.mapper_params import MapperParams, ProjectiveIntegratorParams
 from nvblox_torch.projective_integrator_types import ProjectiveIntegratorType
 from nvblox_torch.sensor import Sensor
 
+from .utils.math_utils import tf_to_matrix
+
 
 class NvbloxNode(Node):
     def __init__(self):
         super().__init__('nvblox_node')
-        self.instance_id = str(uuid.uuid4())[:8]
 
         self.declare_parameter('global_frame', 'map')
         self.declare_parameter('voxel_size_m', 0.05)
@@ -114,7 +114,7 @@ class NvbloxNode(Node):
         self.pcl_pub = self.create_publisher(PointCloud2, '/nvblox/pointcloud', pub_qos)
         self.costmap_pub = self.create_publisher(OccupancyGrid, '/nvblox/costmap', pub_qos)
 
-        self.get_logger().info(f'[{self.instance_id}] NVBlox node online.')
+        self.get_logger().info('NVBlox node online.')
         self.get_logger().info(f'  -> Voxel size: {self.voxel_size_m}m')
         self.get_logger().info(f'  -> Max integration distance: {self.max_integration_distance_m}m')
         self.get_logger().info(f'  -> Mesh update every {self.mesh_update_period} frames')
@@ -130,15 +130,7 @@ class NvbloxNode(Node):
 
     @staticmethod
     def _tf_to_matrix(transform) -> np.ndarray:
-        q = [transform.transform.rotation.x, transform.transform.rotation.y,
-             transform.transform.rotation.z, transform.transform.rotation.w]
-        t = [transform.transform.translation.x, transform.transform.translation.y,
-             transform.transform.translation.z]
-        rot = R.from_quat(q).as_matrix()
-        pose = np.eye(4, dtype=np.float32)
-        pose[:3, :3] = rot
-        pose[:3, 3] = t
-        return pose
+        return tf_to_matrix(transform).astype(np.float32)
 
     def _lookup(self, target_frame: str, source_frame: str, stamp) -> any:
         try:
@@ -229,7 +221,7 @@ class NvbloxNode(Node):
                 self._update_and_publish()
 
         except Exception as e:
-            self.get_logger().error(f'[{self.instance_id}] Integration error: {str(e)}')
+            self.get_logger().error(f'Integration error: {str(e)}')
 
     def head_callback(self, depth_msg: Image, rgb_msg: Image, info_msg: CameraInfo):
         self._integrate_frame(depth_msg, rgb_msg, info_msg, 'head_sensor')
@@ -257,10 +249,10 @@ class NvbloxNode(Node):
             self._publish_costmap(vertices)
 
             if self.frame_count % (self.mesh_update_period * 10) == 0:
-                self.get_logger().info(f'[{self.instance_id}] Mesh: {len(vertices)} vertices, {len(triangles)} triangles')
+                self.get_logger().info(f'Mesh: {len(vertices)} vertices, {len(triangles)} triangles')
 
         except Exception as e:
-            self.get_logger().error(f'[{self.instance_id}] Mesh update error: {str(e)}')
+            self.get_logger().error(f'Mesh update error: {str(e)}')
 
     def _publish_mesh(self, vertices: np.ndarray, triangles: np.ndarray, colors: np.ndarray):
         marker = Marker()

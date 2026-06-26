@@ -22,7 +22,6 @@ setup(
     maintainer_email='baggio@todo.todo',
     description='Multi-agent RGB-D SLAM pipeline for wearable exoskeleton and head-mounted camera system.',
     license='Apache-2.0',
-    tests_require=['pytest'],
     entry_points={
         'console_scripts': [
             'depth_preprocessor = exo_head_slam.depth_preprocessor_node:main',
