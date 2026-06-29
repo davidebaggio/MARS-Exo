@@ -246,6 +246,7 @@ class ExtrinsicSolverNode(Node):
                 self.gyro_R = self.gyro_T[:3, :3]
         self._head_gyro = ω
         self._head_gyro_ts = ts
+        self._try_activate_gyro()
 
     def exo_gyro_cb(self, msg: Vector3Stamped):
         ω = np.array([msg.vector.x, msg.vector.y, msg.vector.z])
@@ -262,6 +263,21 @@ class ExtrinsicSolverNode(Node):
                 self.gyro_R = self.gyro_T[:3, :3]
         self._exo_gyro = ω
         self._exo_gyro_ts = ts
+        self._try_activate_gyro()
+
+    def _try_activate_gyro(self):
+        if not self.gyro_active and self._head_gyro is not None and self._exo_gyro is not None and self.gyro_propagation_enabled:
+            self.gyro_active = True
+            self.gyro_propagation_start = None
+            if self.current_t is None:
+                self.current_t = self.gyro_T[:3, 3].copy()
+                from scipy.spatial.transform import Rotation as R_gyro
+                self.current_q = R_gyro.from_matrix(self.gyro_T[:3, :3]).as_quat()
+                self.get_logger().info(
+                    f"Gyro propagation activated with initial estimate: "
+                    f"t=[{self.current_t[0]:.3f}, {self.current_t[1]:.3f}, {self.current_t[2]:.3f}]")
+            else:
+                self.get_logger().info("Gyro propagation activated (already have visual estimate)")
 
     def solve_callback(self, h_rgb: Image, h_depth: Image, e_rgb: Image, e_depth: Image):
         # Relaxed verification for better stability
