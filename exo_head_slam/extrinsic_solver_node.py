@@ -202,6 +202,7 @@ class ExtrinsicSolverNode(Node):
             ratio = 0.0
             rmse = 0.0
             status = 'UNKNOWN'
+            grav_err = np.nan
             
             try:
                 if self.head_k is None or self.exo_k is None:
@@ -243,7 +244,8 @@ class ExtrinsicSolverNode(Node):
                         except Exception as e:
                             self.get_logger().warn(f"Waiting for link-to-optical TFs: {str(e)}")
                             status = 'WAITING_FOR_LINK_TF'
-                            self.log_metrics(stamp_sec, num_2d, 0, 0, 0.0, 0.0, status)
+                            self.log_metrics(stamp_sec, num_2d, 0, 0, 0.0, 0.0, status,
+                                             gravity_error_deg=grav_err)
                             return
 
                         for p_h, p_e in zip(pts_head, pts_exo):
@@ -344,7 +346,7 @@ class ExtrinsicSolverNode(Node):
                                             g_exo = R_e_link @ g_exo
                                         except Exception:
                                             pass
-                                        aligned, grav_error = check_gravity_alignment(
+                                        aligned, grav_err = check_gravity_alignment(
                                             T[:3, :3], g_head, g_exo, self.imu_gravity_threshold_deg)
                                         if not aligned:
                                             status = 'REJECTED_GRAVITY_MISMATCH'
@@ -375,7 +377,9 @@ class ExtrinsicSolverNode(Node):
                 self.get_logger().error(f"Solver callback failed: {str(e)}")
                 status = f"ERROR_{type(e).__name__}"
 
-            self.log_metrics(stamp_sec, num_2d, num_3d, inliers, ratio, rmse, status)
+            imu_constraint_applied_val = float(self.imu_gravity_enabled and self.head_gravity is not None and self.exo_gravity is not None)
+            self.log_metrics(stamp_sec, num_2d, num_3d, inliers, ratio, rmse, status,
+                             gravity_error_deg=grav_err, imu_constraint_applied=imu_constraint_applied_val)
 
         # ponytail: simple TF fallback - broadcast the last known good filtered transform 
         # with the current timestamp to keep the TF tree active even when solver fails or is throttled.
@@ -402,7 +406,8 @@ class ExtrinsicSolverNode(Node):
         
         self.tf_broadcaster.sendTransform(t_msg)
 
-    def log_metrics(self, timestamp: float, num_2d: int, num_3d: int, inliers: int, ratio: float, rmse: float, status: str):
+    def log_metrics(self, timestamp: float, num_2d: int, num_3d: int, inliers: int, ratio: float, rmse: float, status: str,
+                    gravity_error_deg: float = np.nan, is_stationary: float = np.nan, imu_constraint_applied: float = np.nan):
         if not self.metrics_enabled:
             return
             
@@ -440,9 +445,6 @@ class ExtrinsicSolverNode(Node):
                     dot_product = abs(np.dot(self.current_q, np.array(gt_q)))
                     dot_product = min(1.0, max(0.0, dot_product))
                     error_r_deg = float(np.degrees(2.0 * np.arccos(dot_product)))
-                gravity_error_deg = np.nan
-                is_stationary = np.nan
-                imu_constraint_applied = False if self.imu_gravity_enabled else np.nan
             except Exception:
                 pass
                 
