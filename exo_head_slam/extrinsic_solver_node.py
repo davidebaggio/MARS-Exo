@@ -1,5 +1,6 @@
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import Image, CameraInfo
 from geometry_msgs.msg import TransformStamped, Vector3Stamped
 import tf2_ros
@@ -121,17 +122,18 @@ class ExtrinsicSolverNode(Node):
         self.exo_gravity_frame: Optional[str] = None
 
         if self.imu_gravity_enabled:
+            imu_qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST, depth=10)
             self.head_gravity_sub = self.create_subscription(
                 Vector3Stamped,
                 self.get_parameter('head_gravity_topic').value,
                 self.head_gravity_cb,
-                10
+                imu_qos
             )
             self.exo_gravity_sub = self.create_subscription(
                 Vector3Stamped,
                 self.get_parameter('exo_gravity_topic').value,
                 self.exo_gravity_cb,
-                10
+                imu_qos
             )
         
         # IMU gyro propagation state
@@ -147,17 +149,18 @@ class ExtrinsicSolverNode(Node):
         self._exo_gyro_ts: Optional[float] = None
 
         if self.gyro_propagation_enabled:
+            imu_qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST, depth=10)
             self.head_gyro_sub = self.create_subscription(
                 Vector3Stamped,
                 self.get_parameter('head_gyro_topic').value,
                 self.head_gyro_cb,
-                10
+                imu_qos
             )
             self.exo_gyro_sub = self.create_subscription(
                 Vector3Stamped,
                 self.get_parameter('exo_gyro_topic').value,
                 self.exo_gyro_cb,
-                10
+                imu_qos
             )
 
         # Intrinsics storage

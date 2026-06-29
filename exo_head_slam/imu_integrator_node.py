@@ -1,5 +1,6 @@
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import Imu
 from geometry_msgs.msg import Vector3Stamped
 from std_msgs.msg import String
@@ -81,10 +82,12 @@ class IMUIntegratorNode(Node):
 
         self.head_imu_sub = self.create_subscription(
             Imu, self.get_parameter('head_imu_topic').value,
-            lambda msg: self.imu_callback(msg, 'head'), 10)
+            lambda msg: self.imu_callback(msg, 'head'),
+            QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST, depth=10))
         self.exo_imu_sub = self.create_subscription(
             Imu, self.get_parameter('exo_imu_topic').value,
-            lambda msg: self.imu_callback(msg, 'exo'), 10)
+            lambda msg: self.imu_callback(msg, 'exo'),
+            QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST, depth=10))
 
         self.head_gravity_pub = self.create_publisher(Vector3Stamped, '/imu/head/gravity', 10)
         self.exo_gravity_pub = self.create_publisher(Vector3Stamped, '/imu/exo/gravity', 10)
