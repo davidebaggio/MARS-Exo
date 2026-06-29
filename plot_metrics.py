@@ -58,7 +58,7 @@ def plot_extrinsic(df, time_sec, axs):
 
     ax = axs[3]
     status_counts = df['status'].value_counts()
-    colors = ['#2ecc71' if s == 'SUCCESS' else '#e74c3c' for s in status_counts.index]
+    colors = ['#2ecc71' if s in ('SUCCESS', 'GYRO_PROPAGATED') else '#e74c3c' for s in status_counts.index]
     status_counts.plot(kind='barh', color=colors, ax=ax, edgecolor='black', alpha=0.8)
     ax.set_title('Solver Status', fontweight='bold')
     ax.set_xlabel('Frequency')
@@ -93,7 +93,8 @@ def plot_imu(df, time_sec, axs):
         ax.legend()
 
     ax = axs[2]
-    status_colors = {'SUCCESS': '#2ecc71', 'REJECTED_GRAVITY_MISMATCH': '#e74c3c',
+    status_colors = {'SUCCESS': '#2ecc71', 'GYRO_PROPAGATED': '#1abc9c',
+                     'REJECTED_GRAVITY_MISMATCH': '#e74c3c',
                      'REJECTED_CONFIDENCE_LIMITS': '#f39c12', 'REJECTED_TRANS_JUMP': '#e67e22',
                      'REJECTED_ROT_JUMP': '#d35400', 'NO_2D_MATCHES': '#95a5a6',
                      'INSUFFICIENT_3D_MATCHES': '#7f8c8d', 'RANSAC_FAILED': '#c0392b'}
@@ -115,63 +116,62 @@ def plot_imu(df, time_sec, axs):
         plt.colorbar(sc, ax=ax, label='Time (s)')
 
 
-def main():
-    csv_path = 'extrinsic_metrics.csv'
-    eval_mode = 'auto'
-
-    args = sys.argv[1:]
-    if args and args[0] in ('--imu', '--eval', '--extrinsic'):
-        eval_mode = args[0].lstrip('-')
-        if eval_mode == 'imu':
-            csv_path = 'imu_evaluation.csv'
-        args = args[1:]
-
-    if args:
-        csv_path = args[0]
-
-    if not os.path.exists(csv_path):
-        print(f"Error: Metrics file '{csv_path}' not found.")
-        sys.exit(1)
-
-    print(f"Loading metrics from {csv_path}...")
-    try:
-        df = pd.read_csv(csv_path)
-    except Exception as e:
-        print(f"Error reading CSV: {e}")
-        sys.exit(1)
-
+def generate_plot(df, csv_path, plot_fn, title, output_name):
     if df.empty:
-        print("Error: Metrics file is empty.")
-        sys.exit(0)
-
-    has_imu = 'gravity_error_deg' in df.columns and df['gravity_error_deg'].notna().any()
-    is_summary = 'total_frames' in df.columns
-
-    if is_summary:
-        print("Summary row detected. Plotting evaluation summary stats...")
-        print(df[df['total_frames'].notna()].to_string(index=False))
+        print(f"  Skipping {output_name}: empty data")
         return
-
     t_start = df['timestamp'].iloc[0]
     time_sec = df['timestamp'] - t_start
-
-    if eval_mode == 'imu' or (eval_mode == 'auto' and has_imu):
-        fig, axs = plt.subplots(2, 2, figsize=(16, 10))
-        fig.suptitle('IMU-Enhanced Extrinsic Calibration Metrics', fontsize=16, fontweight='bold')
-        plot_imu(df, time_sec, axs.flatten())
-        output = 'imu_metrics_plot.png'
-    else:
-        fig, axs = plt.subplots(2, 2, figsize=(14, 10))
-        fig.suptitle('Extrinsic Calibration Evaluation Metrics', fontsize=16, fontweight='bold')
-        plot_extrinsic(df, time_sec, axs.flatten())
-        output = 'extrinsic_metrics_plot.png'
-
+    fig, axs = plt.subplots(2, 2, figsize=(16, 10))
+    fig.suptitle(title, fontsize=16, fontweight='bold')
+    plot_fn(df, time_sec, axs.flatten())
     plt.tight_layout()
-    plt.savefig(output, dpi=150)
-    print(f"Plot saved to: {os.path.abspath(output)}")
+    plt.savefig(output_name, dpi=150)
+    print(f"  Saved: {os.path.abspath(output_name)}")
+    plt.close(fig)
 
-    if os.environ.get('DISPLAY', '').strip():
-        plt.show()
+
+def main():
+    extrinsic_csv = 'extrinsic_metrics.csv'
+    imu_csv = 'imu_evaluation.csv'
+
+    if len(sys.argv) > 1:
+        extrinsic_csv = sys.argv[1]
+    if len(sys.argv) > 2:
+        imu_csv = sys.argv[2]
+
+    # --- Extrinsic plot ---
+    ext_df = pd.DataFrame()
+    if os.path.exists(extrinsic_csv):
+        try:
+            ext_df = pd.read_csv(extrinsic_csv)
+        except Exception as e:
+            print(f"Error reading {extrinsic_csv}: {e}")
+
+    if not ext_df.empty and 'total_frames' not in ext_df.columns:
+        generate_plot(ext_df, extrinsic_csv, plot_extrinsic,
+                      'Extrinsic Calibration Evaluation Metrics',
+                      'extrinsic_metrics_plot.png')
+    else:
+        print(f"  Skipping extrinsic plot: no data or summary-only CSV")
+
+    # --- IMU plot ---
+    imu_data = pd.DataFrame()
+    if os.path.exists(imu_csv):
+        try:
+            imu_data = pd.read_csv(imu_csv)
+        except Exception as e:
+            print(f"Error reading {imu_csv}: {e}")
+    else:
+        if not ext_df.empty and 'gravity_error_deg' in ext_df.columns:
+            imu_data = ext_df
+
+    if not imu_data.empty and 'gravity_error_deg' in imu_data.columns and imu_data['gravity_error_deg'].notna().any():
+        generate_plot(imu_data, imu_csv, plot_imu,
+                      'IMU-Enhanced Extrinsic Calibration Metrics',
+                      'imu_metrics_plot.png')
+    else:
+        print(f"  Skipping IMU plot: no IMU metrics found")
 
 
 if __name__ == '__main__':
