@@ -1,7 +1,7 @@
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo
-from geometry_msgs.msg import TransformStamped
+from geometry_msgs.msg import TransformStamped, Vector3Stamped
 import tf2_ros
 import message_filters
 from cv_bridge import CvBridge
@@ -46,6 +46,11 @@ class ExtrinsicSolverNode(Node):
         self.declare_parameter('metrics_csv_path', 'extrinsic_metrics.csv')
         self.declare_parameter('gt_parent_frame', '')
         self.declare_parameter('gt_child_frame', '')
+        
+        self.declare_parameter('imu_gravity_constraint.enabled', True)
+        self.declare_parameter('imu_gravity_constraint.threshold_deg', 15.0)
+        self.declare_parameter('head_gravity_topic', '/imu/head/gravity')
+        self.declare_parameter('exo_gravity_topic', '/imu/exo/gravity')
 
         self.bridge = CvBridge()
         self.matcher = self.create_matcher()
@@ -82,12 +87,35 @@ class ExtrinsicSolverNode(Node):
                         'timestamp', 'num_2d_matches', 'num_3d_matches', 'inliers', 'inlier_ratio', 'rmse', 'status',
                         't_x', 't_y', 't_z', 'q_x', 'q_y', 'q_z', 'q_w',
                         'gt_t_x', 'gt_t_y', 'gt_t_z', 'gt_q_x', 'gt_q_y', 'gt_q_z', 'gt_q_w',
-                        'error_t', 'error_r_deg'
+                        'error_t', 'error_r_deg',
+                        'gravity_error_deg', 'is_stationary', 'imu_constraint_applied',
                     ])
                 self.get_logger().info(f"Logging metrics to {os.path.abspath(self.metrics_csv_path)}")
             except Exception as e:
                 self.get_logger().error(f"Failed to initialize metrics CSV: {str(e)}")
                 self.metrics_enabled = False
+        
+        # IMU gravity constraint
+        self.imu_gravity_enabled = bool(self.get_parameter('imu_gravity_constraint.enabled').value)
+        self.imu_gravity_threshold_deg = float(self.get_parameter('imu_gravity_constraint.threshold_deg').value)
+        self.head_gravity: Optional[np.ndarray] = None
+        self.exo_gravity: Optional[np.ndarray] = None
+        self.head_gravity_frame: Optional[str] = None
+        self.exo_gravity_frame: Optional[str] = None
+
+        if self.imu_gravity_enabled:
+            self.head_gravity_sub = self.create_subscription(
+                Vector3Stamped,
+                self.get_parameter('head_gravity_topic').value,
+                self.head_gravity_cb,
+                10
+            )
+            self.exo_gravity_sub = self.create_subscription(
+                Vector3Stamped,
+                self.get_parameter('exo_gravity_topic').value,
+                self.exo_gravity_cb,
+                10
+            )
         
         # Intrinsics storage
         self.head_k: Optional[np.ndarray] = None
@@ -144,6 +172,14 @@ class ExtrinsicSolverNode(Node):
 
     def exo_info_cb(self, msg: CameraInfo):
         self.exo_k = np.array(msg.k).reshape(3, 3)
+
+    def head_gravity_cb(self, msg: Vector3Stamped):
+        self.head_gravity = np.array([msg.vector.x, msg.vector.y, msg.vector.z])
+        self.head_gravity_frame = msg.header.frame_id
+
+    def exo_gravity_cb(self, msg: Vector3Stamped):
+        self.exo_gravity = np.array([msg.vector.x, msg.vector.y, msg.vector.z])
+        self.exo_gravity_frame = msg.header.frame_id
 
     def solve_callback(self, h_rgb: Image, h_depth: Image, e_rgb: Image, e_depth: Image):
         # Relaxed verification for better stability
@@ -284,9 +320,37 @@ class ExtrinsicSolverNode(Node):
                                             status = 'REJECTED_ROT_JUMP'
                                             valid = False
 
+                                    if valid and self.imu_gravity_enabled and self.head_gravity is not None and self.exo_gravity is not None:
+                                        from exo_head_slam.utils.imu_utils import check_gravity_alignment
+                                        g_head = self.head_gravity.copy()
+                                        g_exo = self.exo_gravity.copy()
+                                        try:
+                                            T_h_link = self.tf_buffer.lookup_transform(
+                                                self.head_frame_id, self.head_gravity_frame,
+                                                h_rgb.header.stamp, rclpy.duration.Duration(seconds=0.1))
+                                            q_h = [T_h_link.transform.rotation.x, T_h_link.transform.rotation.y,
+                                                   T_h_link.transform.rotation.z, T_h_link.transform.rotation.w]
+                                            R_h_link = R.from_quat(q_h).as_matrix()
+                                            g_head = R_h_link @ g_head
+                                        except Exception:
+                                            pass
+                                        try:
+                                            T_e_link = self.tf_buffer.lookup_transform(
+                                                self.exo_frame_id, self.exo_gravity_frame,
+                                                e_rgb.header.stamp, rclpy.duration.Duration(seconds=0.1))
+                                            q_e = [T_e_link.transform.rotation.x, T_e_link.transform.rotation.y,
+                                                   T_e_link.transform.rotation.z, T_e_link.transform.rotation.w]
+                                            R_e_link = R.from_quat(q_e).as_matrix()
+                                            g_exo = R_e_link @ g_exo
+                                        except Exception:
+                                            pass
+                                        aligned, grav_error = check_gravity_alignment(
+                                            T[:3, :3], g_head, g_exo, self.imu_gravity_threshold_deg)
+                                        if not aligned:
+                                            status = 'REJECTED_GRAVITY_MISMATCH'
+                                            valid = False
                                     if valid:
                                         status = 'SUCCESS'
-                                        # Update EMA-filtered state
                                         if self.current_t is None:
                                             self.current_t = new_t
                                             self.current_q = new_q
@@ -376,8 +440,10 @@ class ExtrinsicSolverNode(Node):
                     dot_product = abs(np.dot(self.current_q, np.array(gt_q)))
                     dot_product = min(1.0, max(0.0, dot_product))
                     error_r_deg = float(np.degrees(2.0 * np.arccos(dot_product)))
+                gravity_error_deg = np.nan
+                is_stationary = np.nan
+                imu_constraint_applied = False if self.imu_gravity_enabled else np.nan
             except Exception:
-                # Silently skip if TF lookup fails (e.g. at beginning of bag / sim)
                 pass
                 
         t_x, t_y, t_z = (self.current_t[0], self.current_t[1], self.current_t[2]) if self.current_t is not None else (np.nan, np.nan, np.nan)
@@ -390,7 +456,8 @@ class ExtrinsicSolverNode(Node):
                     timestamp, num_2d, num_3d, inliers, ratio, rmse, status,
                     t_x, t_y, t_z, q_x, q_y, q_z, q_w,
                     gt_t[0], gt_t[1], gt_t[2], gt_q[0], gt_q[1], gt_q[2], gt_q[3],
-                    error_t, error_r_deg
+                    error_t, error_r_deg,
+                    gravity_error_deg, is_stationary, imu_constraint_applied
                 ])
         except Exception as e:
             self.get_logger().error(f"Failed to write metrics row: {str(e)}")

@@ -76,3 +76,14 @@ exo_rgbd_odometry:
     matcher_type: "lightglue"
     lightglue_device: "cuda"
     lightglue_max_keypoints: 2048
+
+exo_imu_processor:
+  ros__parameters:
+    head_imu_topic: "/camera/head/imu"
+    exo_imu_topic: "/camera/exo/imu"
+    window_size: 100
+    gravity_alpha: 0.1
+    motion_gyro_threshold: 0.3
+    motion_accel_var_threshold: 0.5
+    bias_estimation_samples: 100
+    process_rate_hz: 10.0

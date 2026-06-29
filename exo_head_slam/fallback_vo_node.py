@@ -30,6 +30,8 @@ class FallbackVisualOdometryNode(Node):
         self.declare_parameter('matcher_type', 'lightglue')
         self.declare_parameter('lightglue_device', 'cuda')
         self.declare_parameter('lightglue_max_keypoints', 2048)
+        self.declare_parameter('imu_gyro_assist.enabled', True)
+        self.declare_parameter('imu_gyro_topic', '/imu/exo/gyro_filtered')
 
         
         self.publish_tf = self.get_parameter('publish_tf').value
@@ -77,8 +79,26 @@ class FallbackVisualOdometryNode(Node):
         )
         self.ts.registerCallback(self.image_callback)
         
+        # IMU gyro assist
+        self.imu_gyro_enabled = bool(self.get_parameter('imu_gyro_assist.enabled').value)
+        self.latest_gyro: Optional[np.ndarray] = None
+        self.gyro_timestamp: Optional[float] = None
+        if self.imu_gyro_enabled:
+            from geometry_msgs.msg import Vector3Stamped
+            self.gyro_sub = self.create_subscription(
+                Vector3Stamped,
+                self.get_parameter('imu_gyro_topic').value,
+                self.gyro_callback,
+                10
+            )
+        
         self.odom_pub = self.create_publisher(Odometry, 'odom', 10)
+        self.prev_timestamp = None
         self.get_logger().info(f"Fallback VO online ({self.matcher.name}). Parent frame: {self.odom_frame_id}, Child frame: {self.frame_id}")
+
+    def gyro_callback(self, msg):
+        self.latest_gyro = np.array([msg.vector.x, msg.vector.y, msg.vector.z])
+        self.gyro_timestamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
 
     def image_callback(self, rgb_msg, depth_msg, info_msg):
         try:
@@ -86,6 +106,15 @@ class FallbackVisualOdometryNode(Node):
             rgb_img = self.bridge.imgmsg_to_cv2(rgb_msg, desired_encoding='rgb8')
             depth_img = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')
             
+            gyro_rotation = None
+            if self.imu_gyro_enabled and self.latest_gyro is not None and hasattr(self, 'prev_timestamp') and self.prev_timestamp is not None:
+                dt = rgb_msg.header.stamp.sec + rgb_msg.header.stamp.nanosec * 1e-9 - self.prev_timestamp
+                if dt > 0:
+                    from exo_head_slam.utils.imu_utils import gyro_integrate_rotvec
+                    import cv2
+                    rv = gyro_integrate_rotvec(self.latest_gyro, dt)
+                    from scipy.spatial.transform import Rotation as R_gyro
+                    gyro_rotation = R_gyro.from_rotvec(rv).as_matrix()
             if self.prev_rgb is not None:
                 # Match features using configured matcher (ORB or LightGlue)
                 pts_prev, pts_curr = self.matcher.match(self.prev_rgb, rgb_img)
@@ -121,6 +150,7 @@ class FallbackVisualOdometryNode(Node):
             # Save tracking variables
             self.prev_rgb = rgb_img
             self.prev_depth = depth_img
+            self.prev_timestamp = rgb_msg.header.stamp.sec + rgb_msg.header.stamp.nanosec * 1e-9
             
             self.publish_current_odom(rgb_msg.header.stamp)
             

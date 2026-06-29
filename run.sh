@@ -3,6 +3,14 @@ set -euo pipefail
 
 DEFAULT_BAG="data/rosbag2_2026_06_11-15_34_13/rosbag2_2026_06_11-15_34_13_0.mcap"
 BAG_PATH="${1:-$DEFAULT_BAG}"
+EVAL_IMU="${2:-false}"
+if [[ "$EVAL_IMU" == "--eval-imu" ]]; then
+    EVAL_IMU="true"
+elif [[ "$EVAL_IMU" == "true" ]] || [[ "$EVAL_IMU" == "false" ]]; then
+    :
+else
+    EVAL_IMU="false"
+fi
 
 cleanup() {
 	if [[ -n "${BAG_PID:-}" ]] && kill -0 "$BAG_PID" 2>/dev/null; then
@@ -57,8 +65,19 @@ ros2 bag play -i "$BAG_PATH" mcap --loop --rate 0.3 --disable-keyboard-controls 
      #--remap /tf:=/tf_old /tf_static:=/tf_static_old &
 BAG_PID=$!
 
+# Run IMU evaluation after pipeline exits
+eval_imu() {
+    echo "Running IMU metrics evaluation..."
+    python3 -m exo_head_slam.evaluate_imu "$@"
+}
+
 # Launch RViz with pre-configured displays
 rviz2 -d "$(ros2 pkg prefix exo_head_slam)/share/exo_head_slam/rviz/pipeline.rviz" --ros-args -p use_sim_time:=true &
 RVIZ_PID=$!
 
 wait "$PIPELINE_PID"
+
+# Evaluate IMU metrics if flag set
+if [[ "${EVAL_IMU:-false}" == "true" ]]; then
+    eval_imu
+fi

@@ -76,6 +76,14 @@ def generate_launch_description():
         parameters=[common_config, exo_config, common_params],
     )
 
+    # IMU Integrator
+    imu_integrator = Node(
+        package='exo_head_slam',
+        executable='imu_integrator',
+        name='imu_integrator',
+        parameters=[common_config, exo_config, common_params],
+    )
+
     # Debug PointCloud Publishers
     head_pcl_pub = Node(
         package='exo_head_slam',
@@ -134,6 +142,7 @@ def generate_launch_description():
         exo_depth_preprocessor,
         head_masker,
         exo_masker,
+        imu_integrator,
         extrinsic_solver,
         head_pcl_pub,
         exo_pcl_pub,

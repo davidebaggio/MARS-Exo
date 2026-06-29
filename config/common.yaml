@@ -17,3 +17,18 @@ extrinsic_solver:
     metrics_csv_path: "extrinsic_metrics.csv"
     gt_parent_frame: ""
     gt_child_frame: ""
+    imu_gravity_constraint.enabled: true
+    imu_gravity_constraint.threshold_deg: 15.0
+    head_gravity_topic: "/imu/head/gravity"
+    exo_gravity_topic: "/imu/exo/gravity"
+
+imu_integrator:
+  ros__parameters:
+    head_imu_topic: "/camera/head/imu"
+    exo_imu_topic: "/camera/exo/imu"
+    window_size: 100
+    gravity_alpha: 0.1
+    motion_gyro_threshold: 0.3
+    motion_accel_var_threshold: 0.5
+    bias_estimation_samples: 100
+    process_rate_hz: 10.0

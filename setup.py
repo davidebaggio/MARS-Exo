@@ -31,6 +31,7 @@ setup(
             'pointcloud_publisher = exo_head_slam.pointcloud_publisher_node:main',
             'fallback_vo = exo_head_slam.fallback_vo_node:main',
             'nvblox_node = exo_head_slam.nvblox_node:main',
+            'imu_integrator = exo_head_slam.imu_integrator_node:main',
         ],
     },
 )

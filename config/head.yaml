@@ -49,3 +49,14 @@ head_nvblox:
     depth_topic: "/head/masked/depth_raw"
     rgb_topic: "/head/masked/image_raw"
     camera_info_topic: "/camera/head/color/camera_info"
+
+head_imu_processor:
+  ros__parameters:
+    head_imu_topic: "/camera/head/imu"
+    exo_imu_topic: "/camera/exo/imu"
+    window_size: 100
+    gravity_alpha: 0.1
+    motion_gyro_threshold: 0.3
+    motion_accel_var_threshold: 0.5
+    bias_estimation_samples: 100
+    process_rate_hz: 10.0
