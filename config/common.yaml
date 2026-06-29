@@ -21,6 +21,10 @@ extrinsic_solver:
     imu_gravity_constraint.threshold_deg: 15.0
     head_gravity_topic: "/imu/head/gravity"
     exo_gravity_topic: "/imu/exo/gravity"
+    imu_gyro_propagation.enabled: true
+    imu_gyro_propagation.max_duration: 5.0
+    head_gyro_topic: "/imu/head/gyro_filtered"
+    exo_gyro_topic: "/imu/exo/gyro_filtered"
 
 imu_integrator:
   ros__parameters:

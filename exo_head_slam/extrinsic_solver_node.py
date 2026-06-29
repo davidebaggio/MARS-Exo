@@ -52,6 +52,11 @@ class ExtrinsicSolverNode(Node):
         self.declare_parameter('head_gravity_topic', '/imu/head/gravity')
         self.declare_parameter('exo_gravity_topic', '/imu/exo/gravity')
 
+        self.declare_parameter('imu_gyro_propagation.enabled', True)
+        self.declare_parameter('imu_gyro_propagation.max_duration', 5.0)
+        self.declare_parameter('head_gyro_topic', '/imu/head/gyro_filtered')
+        self.declare_parameter('exo_gyro_topic', '/imu/exo/gyro_filtered')
+
         self.bridge = CvBridge()
         self.matcher = self.create_matcher()
         self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
@@ -117,6 +122,32 @@ class ExtrinsicSolverNode(Node):
                 10
             )
         
+        # IMU gyro propagation state
+        self.gyro_propagation_enabled = bool(self.get_parameter('imu_gyro_propagation.enabled').value)
+        self.gyro_max_duration = float(self.get_parameter('imu_gyro_propagation.max_duration').value)
+        self.gyro_T = np.eye(4)
+        self.gyro_R = np.eye(3)
+        self.gyro_active = False
+        self.gyro_propagation_start: Optional[float] = None
+        self._head_gyro: Optional[np.ndarray] = None
+        self._exo_gyro: Optional[np.ndarray] = None
+        self._head_gyro_ts: Optional[float] = None
+        self._exo_gyro_ts: Optional[float] = None
+
+        if self.gyro_propagation_enabled:
+            self.head_gyro_sub = self.create_subscription(
+                Vector3Stamped,
+                self.get_parameter('head_gyro_topic').value,
+                self.head_gyro_cb,
+                10
+            )
+            self.exo_gyro_sub = self.create_subscription(
+                Vector3Stamped,
+                self.get_parameter('exo_gyro_topic').value,
+                self.exo_gyro_cb,
+                10
+            )
+
         # Intrinsics storage
         self.head_k: Optional[np.ndarray] = None
         self.exo_k: Optional[np.ndarray] = None
@@ -180,6 +211,34 @@ class ExtrinsicSolverNode(Node):
     def exo_gravity_cb(self, msg: Vector3Stamped):
         self.exo_gravity = np.array([msg.vector.x, msg.vector.y, msg.vector.z])
         self.exo_gravity_frame = msg.header.frame_id
+
+    def head_gyro_cb(self, msg: Vector3Stamped):
+        ω = np.array([msg.vector.x, msg.vector.y, msg.vector.z])
+        ts = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        if self.gyro_active and self._head_gyro_ts is not None and self._exo_gyro is not None:
+            dt = ts - self._head_gyro_ts
+            if 0 < dt < 0.1:
+                ω_rel = ω - self.gyro_R @ self._exo_gyro
+                from scipy.spatial.transform import Rotation as R_gyro
+                ΔR = R_gyro.from_rotvec(ω_rel * dt).as_matrix()
+                self.gyro_T[:3, :3] = ΔR @ self.gyro_T[:3, :3]
+                self.gyro_R = self.gyro_T[:3, :3]
+        self._head_gyro = ω
+        self._head_gyro_ts = ts
+
+    def exo_gyro_cb(self, msg: Vector3Stamped):
+        ω = np.array([msg.vector.x, msg.vector.y, msg.vector.z])
+        ts = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        if self.gyro_active and self._exo_gyro_ts is not None and self._head_gyro is not None:
+            dt = ts - self._exo_gyro_ts
+            if 0 < dt < 0.1:
+                ω_rel = self._head_gyro - self.gyro_R @ ω
+                from scipy.spatial.transform import Rotation as R_gyro
+                ΔR = R_gyro.from_rotvec(ω_rel * dt).as_matrix()
+                self.gyro_T[:3, :3] = ΔR @ self.gyro_T[:3, :3]
+                self.gyro_R = self.gyro_T[:3, :3]
+        self._exo_gyro = ω
+        self._exo_gyro_ts = ts
 
     def solve_callback(self, h_rgb: Image, h_depth: Image, e_rgb: Image, e_depth: Image):
         # Relaxed verification for better stability
@@ -373,9 +432,29 @@ class ExtrinsicSolverNode(Node):
                                             )
                                         
                                         self.last_solver_time = stamp_sec
+                                        if self.gyro_propagation_enabled:
+                                            self.gyro_T[:3, :3] = T[:3, :3].copy()
+                                            self.gyro_T[:3, 3] = T[:3, 3].copy()
+                                            self.gyro_R = self.gyro_T[:3, :3].copy()
+                                            self.gyro_active = True
+                                            self.gyro_propagation_start = None
             except Exception as e:
                 self.get_logger().error(f"Solver callback failed: {str(e)}")
                 status = f"ERROR_{type(e).__name__}"
+
+            if self.gyro_active and self.gyro_propagation_enabled and status not in ('SUCCESS', 'UNKNOWN', 'WAITING_FOR_CAMERA_INFO', 'WAITING_FOR_LINK_TF'):
+                if self.gyro_propagation_start is None:
+                    self.gyro_propagation_start = stamp_sec
+                elapsed = stamp_sec - self.gyro_propagation_start
+                if elapsed <= self.gyro_max_duration:
+                    if status in ('NO_2D_MATCHES', 'INSUFFICIENT_3D_MATCHES', 'RANSAC_FAILED',
+                                  'REJECTED_CONFIDENCE_LIMITS', 'REJECTED_GRAVITY_MISMATCH'):
+                        self.current_t = self.gyro_T[:3, 3].copy()
+                        from scipy.spatial.transform import Rotation as R_gyro
+                        self.current_q = R_gyro.from_matrix(self.gyro_T[:3, :3]).as_quat()
+                        status = 'GYRO_PROPAGATED'
+                else:
+                    self.gyro_active = False
 
             imu_constraint_applied_val = float(self.imu_gravity_enabled and self.head_gravity is not None and self.exo_gravity is not None)
             self.log_metrics(stamp_sec, num_2d, num_3d, inliers, ratio, rmse, status,
