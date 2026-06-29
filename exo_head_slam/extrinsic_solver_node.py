@@ -190,6 +190,10 @@ class ExtrinsicSolverNode(Node):
         self.ts.registerCallback(self.solve_callback)
         
         self.get_logger().info(f"Extrinsic Solver Node ({self.matcher.name}) initialized.")
+        if self.gyro_propagation_enabled:
+            self.get_logger().info(f"  Gyro propagation enabled (max_duration={self.gyro_max_duration}s)")
+        else:
+            self.get_logger().info("  Gyro propagation disabled")
 
     def create_matcher(self):
         matcher_type = str(self.get_parameter('matcher_type').value).strip().lower()
@@ -227,7 +231,9 @@ class ExtrinsicSolverNode(Node):
     def head_gyro_cb(self, msg: Vector3Stamped):
         ω = np.array([msg.vector.x, msg.vector.y, msg.vector.z])
         ts = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-        if self.gyro_active and self._head_gyro_ts is not None and self._exo_gyro is not None:
+        if self._head_gyro_ts is None:
+            self.get_logger().info(f"Head gyro data received: ω=[{ω[0]:.2f}, {ω[1]:.2f}, {ω[2]:.2f}]")
+        if self._head_gyro_ts is not None and self._exo_gyro is not None:
             dt = ts - self._head_gyro_ts
             if 0 < dt < 0.1:
                 ω_rel = ω - self.gyro_R @ self._exo_gyro
@@ -241,7 +247,9 @@ class ExtrinsicSolverNode(Node):
     def exo_gyro_cb(self, msg: Vector3Stamped):
         ω = np.array([msg.vector.x, msg.vector.y, msg.vector.z])
         ts = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-        if self.gyro_active and self._exo_gyro_ts is not None and self._head_gyro is not None:
+        if self._exo_gyro_ts is None:
+            self.get_logger().info(f"Exo gyro data received: ω=[{ω[0]:.2f}, {ω[1]:.2f}, {ω[2]:.2f}]")
+        if self._exo_gyro_ts is not None and self._head_gyro is not None:
             dt = ts - self._exo_gyro_ts
             if 0 < dt < 0.1:
                 ω_rel = self._head_gyro - self.gyro_R @ ω
@@ -450,6 +458,9 @@ class ExtrinsicSolverNode(Node):
                                             self.gyro_R = self.gyro_T[:3, :3].copy()
                                             self.gyro_active = True
                                             self.gyro_propagation_start = None
+                                            self.get_logger().info(
+                                                f"Gyro propagation reset: active={self.gyro_active}, "
+                                                f"R norm={np.linalg.norm(self.gyro_R):.3f}")
             except Exception as e:
                 self.get_logger().error(f"Solver callback failed: {str(e)}")
                 status = f"ERROR_{type(e).__name__}"
@@ -457,6 +468,7 @@ class ExtrinsicSolverNode(Node):
             if self.gyro_active and self.gyro_propagation_enabled and status not in ('SUCCESS', 'UNKNOWN', 'WAITING_FOR_CAMERA_INFO', 'WAITING_FOR_LINK_TF'):
                 if self.gyro_propagation_start is None:
                     self.gyro_propagation_start = stamp_sec
+                    self.get_logger().info(f"Gyro propagation started at t={stamp_sec:.2f}")
                 elapsed = stamp_sec - self.gyro_propagation_start
                 if elapsed <= self.gyro_max_duration:
                     if status in ('NO_2D_MATCHES', 'INSUFFICIENT_3D_MATCHES', 'RANSAC_FAILED',
@@ -465,8 +477,13 @@ class ExtrinsicSolverNode(Node):
                         from scipy.spatial.transform import Rotation as R_gyro
                         self.current_q = R_gyro.from_matrix(self.gyro_T[:3, :3]).as_quat()
                         status = 'GYRO_PROPAGATED'
+                        self.get_logger().info(
+                            f"Gyro propagation applied: status={status}, "
+                            f"t=[{self.current_t[0]:.3f}, {self.current_t[1]:.3f}, {self.current_t[2]:.3f}], "
+                            f"elapsed={elapsed:.2f}s")
                 else:
                     self.gyro_active = False
+                    self.get_logger().warn(f"Gyro propagation expired after {elapsed:.1f}s")
 
             imu_constraint_applied_val = float(self.imu_gravity_enabled and self.head_gravity is not None and self.exo_gravity is not None)
             self.log_metrics(stamp_sec, num_2d, num_3d, inliers, ratio, rmse, status,
