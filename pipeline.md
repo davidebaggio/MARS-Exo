@@ -9,9 +9,10 @@ The package cleans the depth, removes dynamic objects, estimates the rigid trans
 The goal is to produce a **single fused 3D map** in a shared coordinate system.
 
 To achieve this, the pipeline separates the concerns of pose tracking and 3D reconstruction:
-* **RTAB-Map** runs on the **Exo camera** stream. It uses `rgbd_odometry` (via the python `fallback_vo` node, now with gyro-assisted frame prediction) to track the robot's movement and the SLAM node to broadcast the `map -> odom -> exo_link` TF.
+* **SLAM runs only on the exo camera.** RTAB-Map (with Python `fallback_vo` for odometry) tracks the exo camera and publishes `map -> odom -> exo_link` TF.
+* **Head camera gets no SLAM.** Its pose is derived from the exo SLAM TF tree plus the dynamic extrinsic TF (`exo_link -> head_link`) computed by the extrinsic solver.
 * **IMU Integrator** processes raw `/camera/*/imu` topics from both cameras, publishing gravity direction, filtered gyroscope readings, motion state, and gyro bias estimates.
-* **The Extrinsic Solver** dynamically calculates and broadcasts the spatial link between the cameras (**`exo_link -> head_link`** TF). It uses IMU gravity vectors to reject physically impossible rotation estimates.
+* **The Extrinsic Solver** dynamically calculates and broadcasts the spatial link between the cameras (`exo_link -> head_link`). IMU gravity vectors reject physically impossible rotation estimates.
 * **NVBlox** consumes the combined TF tree and the depth streams from both cameras to perform real-time volumetric TSDF fusion into a single global map.
 
 ## Data Flow Overview
@@ -38,24 +39,26 @@ flowchart TD
     IMU_PROC -->|gravity vectors| F[Extrinsic Solver]
     IMU_PROC -->|filtered gyro| ODO[Fallback VO]
 
-    %% Tracking & Extrinsics
+    %% Tracking - exo only
     C2 --> ODO
-    ODO --> |Publishes TF: odom -> exo| TF_TREE((TF Tree))
+    ODO --> |TF: odom -> exo_link| TF_TREE((TF Tree))
+    C2 --> SLAM[RTAB-Map SLAM]
+    ODO -.->|odometry topic| SLAM
+    SLAM --> |TF: map -> odom| TF_TREE
 
-    C2 --> D_SLAM[RTAB-Map SLAM Node]
-    D_SLAM --> |Publishes TF: map -> odom| TF_TREE
-
+    %% Extrinsic - head derived from exo
     C1 --> F
     C2 --> F
-    F --> |Publishes TF: exo -> head| TF_TREE
+    F --> |TF: exo_link -> head_link| TF_TREE
 
     %% Fusion
-    C1 -. Masked Depth .-> N[Single NVBlox Node]
-    C2 -. Masked Depth .-> N
+    C1 -. Depth .-> N[NVBlox]
+    C2 -. Depth .-> N
     TF_TREE -. Poses .-> N
-
-    N --> J[Single Fused TSDF / Mesh Map]
+    N --> J[Fused TSDF / Mesh / Costmap]
 ```
+
+Note: Only the exo camera has a SLAM pipeline. The head camera pose is computed as `map -> odom -> exo_link -> head_link`.
 
 ## 1. Depth Pre-Processing
 
@@ -65,134 +68,108 @@ The first stage cleans the incoming depth stream before any downstream algorithm
 * Reduce sensor noise.
 * Fill small holes in the depth image.
 * Stabilize frame-to-frame depth variation.
-* Improve the quality of inputs to tracking, calibration, and fusion.
 
-### Current Behavior
+### Behavior
 Each depth preprocessor reads the input topic from YAML, sanitizes invalid values (NaN, infinity), applies spatial smoothing and temporal blending, and publishes the cleaned depth.
 
 ## 2. Semantic Masking
 
-This stage removes dynamic objects from the RGB and depth images. People and moving machinery can corrupt geometric tracking and introduce "ghosting" in the final 3D map.
+Removes dynamic objects (people, vehicles) from RGB and depth images to prevent ghosting in the 3D map.
 
-### Purpose
-* Maintain strict static scene geometry for RTAB-Map and NVBlox.
-* Prevent dynamic obstacles from becoming permanent fixtures in the 3D map.
-
-### Current Behavior
-The semantic masker relies on a detector-backed masking step (e.g., YOLOv8 via Ultralytics). It zeros out masked pixels in both the RGB and Depth images.
+### Behavior
+Uses YOLOv8-seg (via Ultralytics) to detect and mask dynamic classes. Masked pixels are zeroed in both RGB and depth outputs.
 
 ## 3. IMU Integration
 
-The IMU integrator processes raw RealSense IMU data from both cameras and publishes cleaned, derived quantities.
+Processes raw RealSense IMU data from both cameras and publishes cleaned, derived quantities.
 
-### Purpose
-* Provide gravity direction vectors for the extrinsic solver to constrain rotation estimates.
-* Provide filtered gyroscope readings for gyro-assisted visual odometry.
-* Detect motion state (stationary vs moving) for adaptive algorithm behavior.
-* Estimate gyroscope bias during stationary periods.
+### Behavior
+A single `imu_integrator` node subscribes to `/camera/head/imu` and `/camera/exo/imu` (sensor_msgs/Imu). At a configurable rate (default 10 Hz) it:
+* Estimates a low-pass filtered gravity vector per camera.
+* Detects motion state (stationary vs moving).
+* Accumulates gyro samples during stationary periods for bias estimation.
+* Publishes `/imu/*/gravity`, `/imu/*/gyro_filtered`, `/imu/*/motion_state`, `/imu/*/gyro_bias`.
 
-### Current Behavior
-A single `imu_integrator` node subscribes to `/camera/head/imu` and `/camera/exo/imu` (sensor_msgs/Imu). It maintains a sliding window of accelerometer and gyroscope samples for each camera. At a configurable rate (default 10 Hz), it:
-* Estimates a low-pass filtered gravity vector (EMA over accelerometer readings).
-* Detects motion based on gyroscope magnitude and accelerometer variance.
-* Accumulates gyroscope samples during stationary periods for bias estimation.
-* Publishes `/imu/*/gravity`, `/imu/*/gyro_filtered`, `/imu/*/motion_state`, and `/imu/*/gyro_bias`.
+## 4. Pose Tracking (Exo Camera Only)
 
-## 4. Pose Tracking (RTAB-Map + Gyro-Assisted VO)
+The exo camera drives the full SLAM pipeline. The head camera pose is derived indirectly.
 
-The system uses a combination of Visual Odometry and SLAM on the **Exo camera** stream to localize the entire agent within the world.
+### Exo Odometry (`fallback_vo`)
+Python node that computes frame-to-frame motion using ORB or LightGlue feature matching + 3D deprojection + RANSAC. When IMU gyro data is available, integrates angular velocity between frames for a rotation prior, improving robustness during fast motion or low texture. Publishes `odom -> exo_link` TF.
 
-### Purpose
-* Provide robust Visual Odometry (VO) and loop closure.
-* Calculate the camera's metric pose in the global frame.
-* Publish the `map -> odom -> exo_link` TF transform.
+### Exo SLAM (`rtabmap_slam`)
+RTAB-Map node that consumes the odometry topic and performs SLAM with loop closure. Publishes `map -> odom` TF.
 
-### Current Behavior
-* **`exo_rgbd_odometry`** (via `fallback_vo` node): Calculates motion between frames using the Exo camera's masked RGB-D stream. When IMU gyro data is available, it integrates angular velocity between frames to predict rotation, which narrows the feature matching search window and improves tracking robustness during fast motion or low-texture scenes. Publishes the `odom -> exo_link` transform.
-* **`exo_rtabmap`**: Performs SLAM, loop closure detection, and publishes the `map -> odom` transform. Dense mapping is disabled as NVBlox handles 3D reconstruction.
+### Head Camera
+No SLAM instance. Head pose is `map -> odom -> exo_link -> head_link`, where the last transform comes from the extrinsic solver.
 
-## 5. 3D-to-3D Extrinsic Calibration (with IMU Gravity Constraint)
+## 5. Extrinsic Calibration (with IMU Gravity Constraint)
 
-The extrinsic solver estimates the rigid transform between the exo camera and the head camera.
+Estimates the rigid transform connecting head and exo camera frames.
 
-### Purpose
-* Align the two camera frames in SE(3).
-* Broadcast the resulting transform as a TF frame (**`exo_link -> head_link`**).
-* Use IMU gravity vectors as a physical sanity check to reject rotation estimates that violate gravity alignment.
-
-### Current Behavior
-The solver extracts 2D feature correspondences between Exo and Head views using a configurable matcher (`orb` or `lightglue`), deprojects matched pixels into 3D points, and estimates the rigid transform via RANSAC. It broadcasts the transform from the Exo base link `exo_link` (parent) to the Head base link `head_link` (child).
-
-If the IMU gravity constraint is enabled (default), the solver subscribes to `/imu/head/gravity` and `/imu/exo/gravity`. After a successful RANSAC estimate, it checks: `R_estimated * g_head ≈ g_exo`. If the angular error exceeds the configured threshold (default 15°), the solution is rejected with status `REJECTED_GRAVITY_MISMATCH`. Gravity vectors are transformed from their IMU frame to the camera link frame via TF when available.
+### Behavior
+* Subscribes to masked RGB-D streams from both cameras.
+* Extracts 2D feature correspondences (ORB or LightGlue), deprojects to 3D, solves via RANSAC.
+* Broadcasts `exo_link -> head_link` TF.
+* When IMU gravity constraint is enabled: subscribes to `/imu/*/gravity`, transforms gravity vectors to link frames via TF, then checks `R_est * g_head ≈ g_exo`. If angular error exceeds threshold (default 15°), solution is rejected as `REJECTED_GRAVITY_MISMATCH`.
 
 ## 6. Volumetric Fusion (NVBlox)
 
-The final stage feeds the masked depth data into a **single** NVBlox node. NVBlox relies on the TF tree generated by RTAB-Map and the Extrinsic Solver to integrate depth observations into the correct global position.
+Fuses both camera streams into a single TSDF volume on GPU.
 
-### Purpose
-* Aggregate depth observations from *both* cameras over time.
-* Produce a single, real-time TSDF-based mesh and 2D navigation costmap.
-
-### Current Behavior
-The unified NVBlox node subscribes to the masked depth topics of both cameras.
-1. When an Exo depth frame arrives, NVBlox looks up the `map -> odom -> exo_link -> exo_camera_link` TF and integrates the voxels.
-2. When a Head depth frame arrives, NVBlox looks up the `map -> odom -> exo_link -> head_link -> head_camera_link` TF and integrates the voxels into the same map.
+### Behavior
+NVBlox subscribes to masked depth + RGB + camera_info for both cameras. For each frame it looks up the full TF chain from `map` to that camera's link frame, then integrates into the TSDF. Publishes mesh (Marker), pointcloud (PointCloud2), and 2D costmap (OccupancyGrid).
 
 ## 7. Evaluation
 
-Post-hoc evaluation is available for both extrinsic calibration and IMU metrics.
-
 ### Extrinsic Metrics
-The extrinsic solver logs per-frame data to `extrinsic_metrics.csv` (enabled via `metrics_enabled: true` in common.yaml). Columns include match counts, RANSAC inliers, RMSE, status code, and estimated transform. When ground truth TF frames are configured, translation and rotation errors are also logged.
+`extrinsic_metrics.csv` is logged per-frame when `metrics_enabled: true`. Columns: match counts, RANSAC inliers, RMSE, status, estimated transform, gravity error, IMU constraint flag.
 
-`plot_metrics.py` reads the CSV and generates `extrinsic_metrics_plot.png`:
 ```bash
-python3 plot_metrics.py                                # reads extrinsic_metrics.csv
-python3 plot_metrics.py --extrinsic <path>              # force extrinsic mode
+python3 plot_metrics.py                              # plot extrinsic metrics
+python3 plot_metrics.py --extrinsic <path>            # force extrinsic mode
 ```
 
 ### IMU Metrics
-When IMU gravity constraint is enabled, the CSV also includes `gravity_error_deg`, `is_stationary`, and `imu_constraint_applied` columns.
-
-`evaluate_imu.py` reads `extrinsic_metrics.csv` and writes `imu_evaluation.csv` (per-frame data + summary row). `plot_metrics.py --imu` reads it and generates `imu_metrics_plot.png`:
+`evaluate_imu.py` reads `extrinsic_metrics.csv`, writes `imu_evaluation.csv` (per-frame + summary). `plot_metrics.py --imu` generates `imu_metrics_plot.png`.
 
 ```bash
-run.sh --eval-imu                                       # chains evaluate_imu.py → plot_metrics.py --imu
-# Or manually:
-python3 -m exo_head_slam.evaluate_imu                   # reads → imu_evaluation.csv
-python3 plot_metrics.py --imu                           # reads imu_evaluation.csv → imu_metrics_plot.png
+./run.sh --eval-imu                                   # full chain
+python3 -m exo_head_slam.evaluate_imu                 # CSV only
+python3 plot_metrics.py --imu                         # plot from CSV
 ```
 
-## Configuration Layout
+## Configuration
 
-The pipeline is configured through three YAML files:
-* `config/head.yaml`: Head camera topics and parameters (depth preprocessor, semantic masker, NVBlox, IMU processor topics).
-* `config/exo.yaml`: Exo camera topics and parameters (depth preprocessor, semantic masker, NVBlox, RTAB-Map, fallback VO).
-* `config/common.yaml`: Shared parameters (extrinsic solver matchers, TF frame names, IMU gravity constraint config, IMU integrator params).
+* `config/head.yaml`: Head camera topics, depth/masker/NVBlox params, IMU topic references.
+* `config/exo.yaml`: Exo camera topics, depth/masker/NVBlox/RTAB-Map/fallback VO params.
+* `config/common.yaml`: Extrinsic solver, IMU gravity constraint, IMU integrator params.
 
-## Launch Structure
+## Launch Structure (`launch/main_pipeline_launch.py`)
 
-The top-level entry point is `launch/main_pipeline_launch.py`. It starts:
-* Two depth preprocessing nodes.
-* Two semantic masking nodes.
-* One IMU integrator node (before extrinsic solver).
-* One extrinsic solver node (with IMU gravity constraint).
-* Two RTAB-Map nodes for the Exo camera (Odometry + SLAM), optional.
-* One NVBlox node (Global fusion).
-* Two static TF publishers for camera link frames.
+```
+2× depth_preprocessor (head + exo)
+2× semantic_masker (head + exo)
+1× imu_integrator
+1× extrinsic_solver
+2× static TF publishers (exo/exo_camera, head/head_camera)
+2× rtabmap nodes (exo_rgbd_odometry + exo_rtabmap) — optional, skipped if rtabmap_slam not installed
+1× nvblox_node
+2× pointcloud_publisher (head + exo) — debug, conditional on publish_debug_pcl:=true
+```
 
 ## Running
 
 ```bash
-./run.sh                                                   # default bag, no eval
+./run.sh                                                   # default bag
 ./run.sh <bag_path>                                        # custom bag
-./run.sh --eval-imu                                        # default bag + IMU evaluation
-./run.sh <bag_path> --eval-imu                             # custom bag + IMU evaluation
+./run.sh --eval-imu                                        # with IMU evaluation
+./run.sh <bag_path> --eval-imu                             # custom bag + eval
 ```
 
 ## Runtime Assumptions
-* RGB and depth images are published as ROS 2 topics.
-* Depth images are aligned to color.
-* The two camera streams are roughly time-synchronized.
-* Camera calibration data is available through `camera_info` topics.
-* IMU data (sensor_msgs/Imu) on `/camera/head/imu` and `/camera/exo/imu` is optional — without it the pipeline runs in visual-only mode (gravity constraint and gyro assist are skipped).
+* RGB and depth images published as ROS 2 topics, depth aligned to color.
+* Camera calibration available via `camera_info` topics.
+* Head and exo streams roughly time-synchronized.
+* IMU topics (`/camera/*/imu`) optional — without them pipeline runs in visual-only mode.
+* Only the exo camera runs SLAM; head pose derived via extrinsic TF.
