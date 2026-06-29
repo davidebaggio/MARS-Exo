@@ -25,6 +25,10 @@ extrinsic_solver:
     imu_gyro_propagation.max_duration: 5.0
     head_gyro_topic: "/imu/head/gyro_filtered"
     exo_gyro_topic: "/imu/exo/gyro_filtered"
+    head_motion_topic: "/imu/head/motion_state"
+    exo_motion_topic: "/imu/exo/motion_state"
+    max_trans_jump_moving: 0.8
+    max_rot_jump_moving: 1.0
 
 imu_integrator:
   ros__parameters:
