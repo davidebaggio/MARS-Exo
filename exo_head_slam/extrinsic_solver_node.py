@@ -80,6 +80,7 @@ class ExtrinsicSolverNode(Node):
         # Metrics configuration
         self.metrics_enabled = bool(self.get_parameter('metrics_enabled').value)
         self.metrics_csv_path = str(self.get_parameter('metrics_csv_path').value)
+        self.imu_csv_path = os.path.join(os.path.dirname(self.metrics_csv_path) if os.path.dirname(self.metrics_csv_path) else '.', 'imu_evaluation.csv')
         self.gt_parent_frame = str(self.get_parameter('gt_parent_frame').value)
         self.gt_child_frame = str(self.get_parameter('gt_child_frame').value)
         
@@ -98,6 +99,17 @@ class ExtrinsicSolverNode(Node):
                 self.get_logger().info(f"Logging metrics to {os.path.abspath(self.metrics_csv_path)}")
             except Exception as e:
                 self.get_logger().error(f"Failed to initialize metrics CSV: {str(e)}")
+                self.metrics_enabled = False
+            try:
+                with open(self.imu_csv_path, mode='w', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow([
+                        'timestamp', 'num_2d_matches', 'status', 'gravity_error_deg',
+                        'is_stationary', 'imu_constraint_applied',
+                    ])
+                self.get_logger().info(f"Logging IMU metrics to {os.path.abspath(self.imu_csv_path)}")
+            except Exception as e:
+                self.get_logger().error(f"Failed to initialize IMU metrics CSV: {str(e)}")
                 self.metrics_enabled = False
         
         # IMU gravity constraint
@@ -539,6 +551,12 @@ class ExtrinsicSolverNode(Node):
                     gt_t[0], gt_t[1], gt_t[2], gt_q[0], gt_q[1], gt_q[2], gt_q[3],
                     error_t, error_r_deg,
                     gravity_error_deg, is_stationary, imu_constraint_applied
+                ])
+            with open(self.imu_csv_path, mode='a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    timestamp, num_2d, status,
+                    gravity_error_deg, is_stationary, imu_constraint_applied,
                 ])
         except Exception as e:
             self.get_logger().error(f"Failed to write metrics row: {str(e)}")
