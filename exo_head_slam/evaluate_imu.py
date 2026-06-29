@@ -1,149 +1,86 @@
 #!/usr/bin/env python3
 import os
 import sys
+import csv
 import pandas as pd
 import numpy as np
 
-if not os.environ.get('DISPLAY', '').strip():
-    import matplotlib
-    matplotlib.use('Agg')
-
-import matplotlib.pyplot as plt
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_INPUT = os.path.join(CURRENT_DIR, '..', 'extrinsic_metrics.csv')
+DEFAULT_OUTPUT = os.path.join(CURRENT_DIR, '..', 'imu_evaluation.csv')
 
 
-def main():
-    csv_path = 'extrinsic_metrics.csv'
-    if len(sys.argv) > 1:
-        csv_path = sys.argv[1]
-
-    if not os.path.exists(csv_path):
-        print(f"Error: Metrics file '{csv_path}' not found.")
+def compute_imu_evaluation(input_csv: str, output_csv: str):
+    if not os.path.exists(input_csv):
+        print(f"Error: Input metrics file '{input_csv}' not found.")
         sys.exit(1)
 
-    print(f"Loading metrics from {csv_path}...")
-    df = pd.read_csv(csv_path)
+    print(f"Loading metrics from {input_csv}...")
+    df = pd.read_csv(input_csv)
 
     if df.empty:
         print("Error: Metrics file is empty.")
         sys.exit(0)
 
+    has_imu = 'gravity_error_deg' in df.columns and df['gravity_error_deg'].notna().any()
+
     t_start = df['timestamp'].iloc[0]
     time_sec = df['timestamp'] - t_start
 
-    fig, axs = plt.subplots(2, 3, figsize=(18, 10))
-    fig.suptitle('IMU-Enhanced Extrinsic Calibration Metrics', fontsize=16, fontweight='bold')
+    rows = []
+    for idx, row in df.iterrows():
+        r = {
+            'timestamp': row.get('timestamp', np.nan),
+            'time_sec': time_sec.iloc[idx] if idx < len(time_sec) else np.nan,
+            'num_2d_matches': row.get('num_2d_matches', np.nan),
+            'num_3d_matches': row.get('num_3d_matches', np.nan),
+            'inliers': row.get('inliers', np.nan),
+            'inlier_ratio': row.get('inlier_ratio', np.nan),
+            'rmse': row.get('rmse', np.nan),
+            'status': row.get('status', ''),
+        }
+        if has_imu:
+            r['gravity_error_deg'] = row.get('gravity_error_deg', np.nan)
+            r['is_stationary'] = row.get('is_stationary', np.nan)
+            r['imu_constraint_applied'] = row.get('imu_constraint_applied', np.nan)
+        rows.append(r)
 
-    has_imu = 'gravity_error_deg' in df.columns and df['gravity_error_deg'].notna().any()
+    summary = {}
+    total = len(df)
+    successes = int((df['status'] == 'SUCCESS').sum())
+    summary['total_frames'] = total
+    summary['successes'] = successes
+    summary['success_rate_pct'] = round(successes / total * 100, 2) if total > 0 else 0.0
 
     if has_imu:
-        ax = axs[0, 0]
-        ax.plot(time_sec, df['gravity_error_deg'], color='#9b59b6', linewidth=1.5)
-        ax.axhline(y=15.0, color='red', linestyle='--', alpha=0.5, label='Rejection threshold')
-        ax.set_title('Gravity Alignment Error', fontweight='bold')
-        ax.set_xlabel('Time (s)')
-        ax.set_ylabel('Angular Error (deg)')
-        ax.grid(True, linestyle='--', alpha=0.6)
-        ax.legend()
-
-        ax = axs[0, 1]
-        success_mask = df['status'] == 'SUCCESS'
-        if 'imu_constraint_applied' in df.columns:
-            imu_mask = df['imu_constraint_applied'] == True
-            if imu_mask.any():
-                ax.scatter(time_sec[success_mask & imu_mask],
-                           df.loc[success_mask & imu_mask, 'gravity_error_deg'],
-                           color='#2ecc71', label='IMU constraint ON', alpha=0.7, s=20)
-            ax.scatter(time_sec[success_mask & ~imu_mask],
-                       df.loc[success_mask & ~imu_mask, 'gravity_error_deg'],
-                       color='#3498db', label='IMU constraint OFF', alpha=0.7, s=20)
-            ax.set_title('Gravity Error by IMU Constraint', fontweight='bold')
-            ax.set_xlabel('Time (s)')
-            ax.set_ylabel('Gravity Error (deg)')
-            ax.grid(True, linestyle='--', alpha=0.6)
-            ax.legend()
-        else:
-            ax.text(0.5, 0.5, 'No IMU constraint data', ha='center', va='center',
-                    transform=ax.transAxes, fontsize=14, color='gray')
-            ax.set_title('IMU Constraint Analysis', fontweight='bold')
-
-        ax = axs[0, 2]
-        if 'is_stationary' in df.columns:
-            stationary = df['is_stationary'] == True
-            moving = df['is_stationary'] == False
-            unknown = df['is_stationary'].isna()
-            labels = []
-            sizes = []
-            colors_ = []
-            if stationary.any():
-                labels.append(f'Stationary ({stationary.sum()})')
-                sizes.append(stationary.sum())
-                colors_.append('#2ecc71')
-            if moving.any():
-                labels.append(f'Moving ({moving.sum()})')
-                sizes.append(moving.sum())
-                colors_.append('#e74c3c')
-            if unknown.any():
-                labels.append(f'Unknown ({unknown.sum()})')
-                sizes.append(unknown.sum())
-                colors_.append('#95a5a6')
-            if sizes:
-                ax.pie(sizes, labels=labels, colors=colors_, autopct='%1.1f%%', startangle=90)
-            ax.set_title('Motion State Distribution', fontweight='bold')
-
-        ax = axs[1, 0]
-        status_colors = {'SUCCESS': '#2ecc71', 'REJECTED_GRAVITY_MISMATCH': '#e74c3c',
-                         'REJECTED_CONFIDENCE_LIMITS': '#f39c12', 'REJECTED_TRANS_JUMP': '#e67e22',
-                         'REJECTED_ROT_JUMP': '#d35400', 'NO_2D_MATCHES': '#95a5a6',
-                         'INSUFFICIENT_3D_MATCHES': '#7f8c8d', 'RANSAC_FAILED': '#c0392b'}
-        status_counts = df['status'].value_counts()
-        colors_list = [status_colors.get(s, '#34495e') for s in status_counts.index]
-        status_counts.plot(kind='barh', color=colors_list, ax=ax, edgecolor='black', alpha=0.8)
-        ax.set_title('Status Breakdown (with IMU)', fontweight='bold')
-        ax.set_xlabel('Frequency')
-        ax.grid(True, axis='x', linestyle='--', alpha=0.6)
-
-        ax = axs[1, 1]
-        if 'rmse' in df.columns and 'gravity_error_deg' in df.columns:
-            sc = ax.scatter(df['rmse'], df['gravity_error_deg'],
-                            c=time_sec, cmap='viridis', alpha=0.6, s=15)
-            ax.set_title('RMSE vs Gravity Error', fontweight='bold')
-            ax.set_xlabel('RANSAC RMSE (m)')
-            ax.set_ylabel('Gravity Alignment Error (deg)')
-            ax.grid(True, linestyle='--', alpha=0.6)
-            plt.colorbar(sc, ax=ax, label='Time (s)')
-
-        ax = axs[1, 2]
-        ax.axis('off')
-        total = len(df)
-        successes = (df['status'] == 'SUCCESS').sum()
-        gravity_rejects = (df['status'] == 'REJECTED_GRAVITY_MISMATCH').sum() if 'REJECTED_GRAVITY_MISMATCH' in df['status'].values else 0
-        success_rate = successes / total * 100 if total > 0 else 0
-        summary_text = (
-            f"Total frames: {total}\n"
-            f"Successes: {successes} ({success_rate:.1f}%)\n"
-            f"Gravity rejects: {gravity_rejects}\n"
-            f"Mean gravity error: {df['gravity_error_deg'].mean():.2f}°\n"
-            f"Median gravity error: {df['gravity_error_deg'].median():.2f}°\n"
-            f"Std gravity error: {df['gravity_error_deg'].std():.2f}°"
-        )
-        ax.text(0.1, 0.5, summary_text, transform=ax.transAxes, fontsize=13,
-                verticalalignment='center', fontfamily='monospace',
-                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-        ax.set_title('IMU Metrics Summary', fontweight='bold')
+        summary['gravity_rejects'] = int((df['status'] == 'REJECTED_GRAVITY_MISMATCH').sum())
+        gerr = df['gravity_error_deg'].dropna()
+        summary['gravity_error_mean_deg'] = round(float(gerr.mean()), 4) if len(gerr) > 0 else np.nan
+        summary['gravity_error_median_deg'] = round(float(gerr.median()), 4) if len(gerr) > 0 else np.nan
+        summary['gravity_error_std_deg'] = round(float(gerr.std()), 4) if len(gerr) > 0 else np.nan
+        summary['gravity_error_min_deg'] = round(float(gerr.min()), 4) if len(gerr) > 0 else np.nan
+        summary['gravity_error_max_deg'] = round(float(gerr.max()), 4) if len(gerr) > 0 else np.nan
     else:
-        for ax in axs.flat:
-            ax.text(0.5, 0.5, 'No IMU metrics data found.\nRun pipeline with IMU enabled.',
-                    ha='center', va='center', transform=ax.transAxes, fontsize=12, color='gray')
-            ax.set_title('No IMU Data', fontweight='bold')
+        summary['gravity_rejects'] = 0
 
-    plt.tight_layout()
+    try:
+        with open(output_csv, mode='w', newline='') as f:
+            fieldnames = list(rows[0].keys()) if rows else []
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+            writer.writerow({k: summary.get(k, '') for k in fieldnames})
+        print(f"IMU evaluation CSV saved to: {os.path.abspath(output_csv)}")
+    except Exception as e:
+        print(f"Error writing IMU evaluation CSV: {e}")
 
-    output = 'imu_metrics_plot.png'
-    plt.savefig(output, dpi=150)
-    print(f"IMU metrics plot saved to: {os.path.abspath(output)}")
+    return output_csv, has_imu
 
-    if os.environ.get('DISPLAY', '').strip():
-        plt.show()
+
+def main():
+    input_csv = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_INPUT
+    output_csv = sys.argv[2] if len(sys.argv) > 2 else DEFAULT_OUTPUT
+    compute_imu_evaluation(input_csv, output_csv)
 
 
 if __name__ == '__main__':

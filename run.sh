@@ -69,6 +69,8 @@ BAG_PID=$!
 eval_imu() {
     echo "Running IMU metrics evaluation..."
     python3 -m exo_head_slam.evaluate_imu "$@"
+    echo "Generating IMU metrics plot..."
+    python3 "$(dirname "$0")/plot_metrics.py" --imu "$@"
 }
 
 # Launch RViz with pre-configured displays
