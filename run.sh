@@ -2,15 +2,14 @@
 set -euo pipefail
 
 DEFAULT_BAG="data/rosbag2_2026_06_11-15_34_13/rosbag2_2026_06_11-15_34_13_0.mcap"
-BAG_PATH="${1:-$DEFAULT_BAG}"
-EVAL_IMU="${2:-false}"
-if [[ "$EVAL_IMU" == "--eval-imu" ]]; then
-    EVAL_IMU="true"
-elif [[ "$EVAL_IMU" == "true" ]] || [[ "$EVAL_IMU" == "false" ]]; then
-    :
-else
-    EVAL_IMU="false"
-fi
+EVAL_IMU="false"
+BAG_PATH="$DEFAULT_BAG"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --eval-imu) EVAL_IMU="true"; shift ;;
+        *) BAG_PATH="$1"; shift ;;
+    esac
+done
 
 cleanup() {
 	if [[ -n "${BAG_PID:-}" ]] && kill -0 "$BAG_PID" 2>/dev/null; then
