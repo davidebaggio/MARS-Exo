@@ -61,7 +61,7 @@ PIPELINE_PID=$!
 wait_for_pipeline
 
 echo "Starting bag playback: $BAG_PATH"
-ros2 bag play -i "$BAG_PATH" mcap --loop --rate 0.3 --disable-keyboard-controls --clock &
+ros2 bag play -s mcap "$BAG_PATH" --loop --rate 0.3 --disable-keyboard-controls --clock &
      #--remap /tf:=/tf_old /tf_static:=/tf_static_old &
 BAG_PID=$!
 
