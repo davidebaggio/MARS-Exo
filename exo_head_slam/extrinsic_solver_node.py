@@ -274,7 +274,7 @@ class ExtrinsicSolverNode(Node):
             rmse = 0.0
             status = 'UNKNOWN'
             grav_err = np.nan
-            
+
             try:
                 if self.head_k is None or self.exo_k is None:
                     self.get_logger().warn("Waiting for CameraInfo...")
