@@ -41,15 +41,6 @@ def gyro_integrate_rotvec(gyro_ang_vel: np.ndarray, dt: float) -> np.ndarray:
     return gyro_ang_vel * dt
 
 
-def gyro_integrate_to_matrix(gyro_samples: np.ndarray, dts: np.ndarray) -> np.ndarray:
-    rot = np.eye(3)
-    for w, dt in zip(gyro_samples, dts):
-        rv = w * dt
-        dR = R.from_rotvec(rv).as_matrix()
-        rot = dR @ rot
-    return rot
-
-
 def check_gravity_alignment(
     R_est: np.ndarray,
     g_head: np.ndarray,

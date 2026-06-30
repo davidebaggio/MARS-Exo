@@ -131,14 +131,54 @@ def generate_plot(df, csv_path, plot_fn, title, output_name):
     plt.close(fig)
 
 
+def print_metrics_summary(df):
+    if df.empty:
+        return
+    print("\n" + "="*50)
+    print("      EXTRINSIC SOLVER & IMU EVALUATION SUMMARY      ")
+    print("="*50)
+    total = len(df)
+    successes = int((df['status'] == 'SUCCESS').sum())
+    gyro_propagated = int((df['status'] == 'GYRO_PROPAGATED').sum())
+    success_rate = (successes / total * 100) if total > 0 else 0.0
+    
+    print(f"Total processed frames: {total}")
+    print(f"Solver Successes:       {successes} ({success_rate:.2f}%)")
+    if gyro_propagated > 0:
+        print(f"Gyro Propagations:      {gyro_propagated}")
+    
+    # RANSAC/Error stats
+    valid_rmse = df['rmse'][np.isfinite(df['rmse'])].dropna()
+    if not valid_rmse.empty:
+        print(f"Mean RANSAC RMSE:       {valid_rmse.mean():.4f} m")
+        print(f"Max RANSAC RMSE:        {valid_rmse.max():.4f} m")
+        
+    has_gt = 'error_t' in df.columns and df['error_t'].notna().any()
+    if has_gt:
+        err_t = df['error_t'].dropna()
+        err_r = df['error_r_deg'].dropna()
+        print(f"Mean Translation Error: {err_t.mean():.4f} m")
+        print(f"Mean Rotation Error:    {err_r.mean():.4f} deg")
+
+    # IMU Gravity Alignment stats
+    has_imu = 'gravity_error_deg' in df.columns and df['gravity_error_deg'].notna().any()
+    if has_imu:
+        gerr = df['gravity_error_deg'].dropna()
+        gravity_rejects = int((df['status'] == 'REJECTED_GRAVITY_MISMATCH').sum())
+        print(f"Gravity Angular Rejects: {gravity_rejects}")
+        if not gerr.empty:
+            print(f"Gravity Error Mean:     {gerr.mean():.4f} deg")
+            print(f"Gravity Error Median:   {gerr.median():.4f} deg")
+            print(f"Gravity Error Std Dev:  {gerr.std():.4f} deg")
+            print(f"Gravity Error Min/Max:  {gerr.min():.4f} / {gerr.max():.4f} deg")
+    print("="*50 + "\n")
+
+
 def main():
     extrinsic_csv = 'extrinsic_metrics.csv'
-    imu_csv = 'imu_evaluation.csv'
 
     if len(sys.argv) > 1:
         extrinsic_csv = sys.argv[1]
-    if len(sys.argv) > 2:
-        imu_csv = sys.argv[2]
 
     # --- Extrinsic plot ---
     ext_df = pd.DataFrame()
@@ -152,22 +192,15 @@ def main():
         generate_plot(ext_df, extrinsic_csv, plot_extrinsic,
                       'Extrinsic Calibration Evaluation Metrics',
                       'extrinsic_metrics_plot.png')
+        print_metrics_summary(ext_df)
     else:
         print(f"  Skipping extrinsic plot: no data or summary-only CSV")
 
     # --- IMU plot ---
-    imu_data = pd.DataFrame()
-    if os.path.exists(imu_csv):
-        try:
-            imu_data = pd.read_csv(imu_csv)
-        except Exception as e:
-            print(f"Error reading {imu_csv}: {e}")
-    else:
-        if not ext_df.empty and 'gravity_error_deg' in ext_df.columns:
-            imu_data = ext_df
+    imu_data = ext_df
 
     if not imu_data.empty and 'gravity_error_deg' in imu_data.columns and imu_data['gravity_error_deg'].notna().any():
-        generate_plot(imu_data, imu_csv, plot_imu,
+        generate_plot(imu_data, extrinsic_csv, plot_imu,
                       'IMU-Enhanced Extrinsic Calibration Metrics',
                       'imu_metrics_plot.png')
     else:

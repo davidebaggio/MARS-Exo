@@ -96,6 +96,9 @@ class FallbackVisualOdometryNode(Node):
         self.prev_timestamp = None
         self.get_logger().info(f"Fallback VO online ({self.matcher.name}). Parent frame: {self.odom_frame_id}, Child frame: {self.frame_id}")
 
+        # Publish identity transform immediately so odom→exo_link exists from startup
+        self.publish_current_odom(self.get_clock().now().to_msg())
+
     def gyro_callback(self, msg):
         self.latest_gyro = np.array([msg.vector.x, msg.vector.y, msg.vector.z])
         self.gyro_timestamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
@@ -107,16 +110,16 @@ class FallbackVisualOdometryNode(Node):
             depth_img = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')
             
             gyro_rotation = None
-            if self.imu_gyro_enabled and self.latest_gyro is not None and hasattr(self, 'prev_timestamp') and self.prev_timestamp is not None:
+            if self.imu_gyro_enabled and self.latest_gyro is not None and self.prev_timestamp is not None:
                 dt = rgb_msg.header.stamp.sec + rgb_msg.header.stamp.nanosec * 1e-9 - self.prev_timestamp
                 if dt > 0:
                     from exo_head_slam.utils.imu_utils import gyro_integrate_rotvec
-                    import cv2
                     rv = gyro_integrate_rotvec(self.latest_gyro, dt)
                     from scipy.spatial.transform import Rotation as R_gyro
                     gyro_rotation = R_gyro.from_rotvec(rv).as_matrix()
+
+            visual_success = False
             if self.prev_rgb is not None:
-                # Match features using configured matcher (ORB or LightGlue)
                 pts_prev, pts_curr = self.matcher.match(self.prev_rgb, rgb_img)
                 
                 if len(pts_prev) >= 10:
@@ -139,13 +142,23 @@ class FallbackVisualOdometryNode(Node):
                     pts_curr_3d = np.array(pts_curr_3d)
                     
                     if len(pts_prev_3d) >= 10:
-                        # RANSAC estimation: pts_prev ~ T_prev_curr * pts_curr
                         T_prev_curr, inliers, rmse = compute_transform_ransac(pts_curr_3d, pts_prev_3d, threshold=0.05, iterations=100)
                         
                         if T_prev_curr is not None and inliers >= 8:
                             self.T_odom_cam = self.T_odom_cam @ T_prev_curr
-                        else:
-                            self.get_logger().warn("Fallback VO: tracking failure, insufficient inliers")
+                            visual_success = True
+
+            if not visual_success:
+                if gyro_rotation is not None:
+                    T_gyro = np.eye(4)
+                    T_gyro[:3, :3] = gyro_rotation
+                    self.T_odom_cam = self.T_odom_cam @ T_gyro
+                elif self.prev_rgb is not None:
+                    self.get_logger().warn("Fallback VO: tracking failure, no gyro")
+            
+            # Orthogonalize rotation matrix to prevent numerical drift
+            U, _, Vt = np.linalg.svd(self.T_odom_cam[:3, :3])
+            self.T_odom_cam[:3, :3] = U @ Vt
             
             # Save tracking variables
             self.prev_rgb = rgb_img

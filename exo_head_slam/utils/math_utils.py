@@ -1,6 +1,7 @@
 import numpy as np
 from typing import Tuple, Optional
 import rclpy
+from scipy.spatial.transform import Rotation
 
 logger = rclpy.logging.get_logger('math_utils')
 
@@ -30,21 +31,11 @@ def compute_transform_svd(points_A: np.ndarray, points_B: np.ndarray) -> Tuple[n
     AA = points_A - centroid_A
     BB = points_B - centroid_B
 
-    # 3. Covariance
-    H = AA.T @ BB
+    # 3. Align vectors using scipy
+    R_est, _ = Rotation.align_vectors(BB, AA)
+    R = R_est.as_matrix()
 
-    # 4. SVD
-    U, S, Vt = np.linalg.svd(H)
-
-    # 5. Rotation R
-    R = Vt.T @ U.T
-
-    # Special case for reflection
-    if np.linalg.det(R) < 0:
-        Vt[2, :] *= -1
-        R = Vt.T @ U.T
-
-    # 6. Translation t
+    # 4. Translation t
     t = centroid_B.T - R @ centroid_A.T
 
     return R, t.reshape(3, 1)

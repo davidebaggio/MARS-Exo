@@ -66,9 +66,14 @@ class ExtrinsicSolverNode(Node):
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
+        # Re-broadcast last known transform at 10 Hz to prevent TF buffer expiry
+        self.create_timer(0.1, self.gyro_broadcast_timer)
+
         self.tf_filter_alpha = float(self.get_parameter('tf_filter_alpha').value)
-        self.current_t: Optional[np.ndarray] = None
-        self.current_q: Optional[np.ndarray] = None
+        # Initial guess: head ~30cm above exo. Keeps TF tree connected before first solve.
+        self.current_t: np.ndarray = np.array([0.0, 0.0, 0.3])
+        self.current_q: np.ndarray = np.array([0.0, 0.0, 0.0, 1.0])
+        self._has_real_solve = False  # True after first successful visual solve
 
         self.min_solver_interval = float(self.get_parameter('min_solver_interval').value)
         self.max_ransac_rmse = float(self.get_parameter('max_ransac_rmse').value)
@@ -81,9 +86,6 @@ class ExtrinsicSolverNode(Node):
 
         self.metrics_enabled = bool(self.get_parameter('metrics_enabled').value)
         self.metrics_csv_path = str(self.get_parameter('metrics_csv_path').value)
-        self.imu_csv_path = os.path.join(
-            os.path.dirname(self.metrics_csv_path) if os.path.dirname(self.metrics_csv_path) else '.',
-            'imu_evaluation.csv')
         self.gt_parent_frame = str(self.get_parameter('gt_parent_frame').value)
         self.gt_child_frame = str(self.get_parameter('gt_child_frame').value)
 
@@ -93,10 +95,6 @@ class ExtrinsicSolverNode(Node):
                 't_x', 't_y', 't_z', 'q_x', 'q_y', 'q_z', 'q_w',
                 'gt_t_x', 'gt_t_y', 'gt_t_z', 'gt_q_x', 'gt_q_y', 'gt_q_z', 'gt_q_w',
                 'error_t', 'error_r_deg',
-                'gravity_error_deg', 'is_stationary', 'imu_constraint_applied',
-            ])
-            self._init_csv(self.imu_csv_path, [
-                'timestamp', 'num_2d_matches', 'status',
                 'gravity_error_deg', 'is_stationary', 'imu_constraint_applied',
             ])
 
@@ -123,13 +121,14 @@ class ExtrinsicSolverNode(Node):
         self.gyro_max_duration = float(self.get_parameter('imu_gyro_propagation.max_duration').value)
         self.gyro_T = np.eye(4)
         self.gyro_R = np.eye(3)
-        self.gyro_propagation_start: Optional[float] = None
-        self._head_gyro: Optional[np.ndarray] = None
-        self._exo_gyro: Optional[np.ndarray] = None
-        self._head_gyro_ts: Optional[float] = None
-        self._exo_gyro_ts: Optional[float] = None
-        self.head_motion_state: Optional[str] = None
-        self.exo_motion_state: Optional[str] = None
+        self.gyro_propagation_start = None
+        self.in_fallback = False
+        self._head_gyro = None
+        self._exo_gyro = None
+        self._head_gyro_ts = None
+        self._exo_gyro_ts = None
+        self.head_motion_state = None
+        self.exo_motion_state = None
 
         if self.gyro_propagation_enabled:
             self.head_gyro_sub = self.create_subscription(
@@ -181,8 +180,6 @@ class ExtrinsicSolverNode(Node):
             self.get_logger().info(f"Logging to {os.path.abspath(path)}")
         except Exception as e:
             self.get_logger().error(f"Failed to init CSV {path}: {str(e)}")
-            if 'imu_evaluation' in path:
-                self.metrics_enabled = False
 
     def create_matcher(self):
         matcher_type = str(self.get_parameter('matcher_type').value).strip().lower()
@@ -211,40 +208,48 @@ class ExtrinsicSolverNode(Node):
         self.exo_gravity_frame = msg.header.frame_id
 
     def head_gyro_cb(self, msg: Vector3Stamped):
-        ω = np.array([msg.vector.x, msg.vector.y, msg.vector.z])
-        ts = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-        if self._head_gyro_ts is not None and self._exo_gyro is not None:
-            dt = ts - self._head_gyro_ts
-            if 0 < dt < 0.1:
-                ω_rel = ω - self.gyro_R @ self._exo_gyro
-                ΔR = Rotation.from_rotvec(ω_rel * dt).as_matrix()
-                self.gyro_T[:3, :3] = ΔR @ self.gyro_T[:3, :3]
-                self.gyro_R = self.gyro_T[:3, :3]
-                self.current_t = self.gyro_T[:3, 3].copy()
-                self.current_q = Rotation.from_matrix(self.gyro_T[:3, :3]).as_quat()
-        self._head_gyro = ω
-        self._head_gyro_ts = ts
-        if self._head_gyro_ts is not None and self._exo_gyro_ts is not None and self.current_t is None:
-            self.current_t = self.gyro_T[:3, 3].copy()
-            self.current_q = Rotation.from_matrix(self.gyro_T[:3, :3]).as_quat()
+        try:
+            ω = np.array([msg.vector.x, msg.vector.y, msg.vector.z])
+            ts = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+            if self.in_fallback and self._head_gyro_ts is not None and self._exo_gyro is not None:
+                dt = ts - self._head_gyro_ts
+                if 0 < dt < 0.15:
+                    ω_rel = ω - self.gyro_R @ self._exo_gyro
+                    ΔR = Rotation.from_rotvec(ω_rel * dt).as_matrix()
+                    self.gyro_T[:3, :3] = ΔR @ self.gyro_T[:3, :3]
+                    # Orthogonalize rotation matrix to prevent numerical drift
+                    U, _, Vt = np.linalg.svd(self.gyro_T[:3, :3])
+                    self.gyro_T[:3, :3] = U @ Vt
+                    self.gyro_R = self.gyro_T[:3, :3]
+                    self.current_t = self.gyro_T[:3, 3].copy()
+                    self.current_q = Rotation.from_matrix(self.gyro_T[:3, :3]).as_quat()
+                    self.broadcast_transform(msg.header.stamp)
+            self._head_gyro = ω
+            self._head_gyro_ts = ts
+        except Exception as e:
+            self.get_logger().error(f"Error in head gyro callback: {str(e)}")
 
     def exo_gyro_cb(self, msg: Vector3Stamped):
-        ω = np.array([msg.vector.x, msg.vector.y, msg.vector.z])
-        ts = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-        if self._exo_gyro_ts is not None and self._head_gyro is not None:
-            dt = ts - self._exo_gyro_ts
-            if 0 < dt < 0.1:
-                ω_rel = self._head_gyro - self.gyro_R @ ω
-                ΔR = Rotation.from_rotvec(ω_rel * dt).as_matrix()
-                self.gyro_T[:3, :3] = ΔR @ self.gyro_T[:3, :3]
-                self.gyro_R = self.gyro_T[:3, :3]
-                self.current_t = self.gyro_T[:3, 3].copy()
-                self.current_q = Rotation.from_matrix(self.gyro_T[:3, :3]).as_quat()
-        self._exo_gyro = ω
-        self._exo_gyro_ts = ts
-        if self._head_gyro_ts is not None and self._exo_gyro_ts is not None and self.current_t is None:
-            self.current_t = self.gyro_T[:3, 3].copy()
-            self.current_q = Rotation.from_matrix(self.gyro_T[:3, :3]).as_quat()
+        try:
+            ω = np.array([msg.vector.x, msg.vector.y, msg.vector.z])
+            ts = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+            if self.in_fallback and self._exo_gyro_ts is not None and self._head_gyro is not None:
+                dt = ts - self._exo_gyro_ts
+                if 0 < dt < 0.15:
+                    ω_rel = self._head_gyro - self.gyro_R @ ω
+                    ΔR = Rotation.from_rotvec(ω_rel * dt).as_matrix()
+                    self.gyro_T[:3, :3] = ΔR @ self.gyro_T[:3, :3]
+                    # Orthogonalize rotation matrix to prevent numerical drift
+                    U, _, Vt = np.linalg.svd(self.gyro_T[:3, :3])
+                    self.gyro_T[:3, :3] = U @ Vt
+                    self.gyro_R = self.gyro_T[:3, :3]
+                    self.current_t = self.gyro_T[:3, 3].copy()
+                    self.current_q = Rotation.from_matrix(self.gyro_T[:3, :3]).as_quat()
+                    self.broadcast_transform(msg.header.stamp)
+            self._exo_gyro = ω
+            self._exo_gyro_ts = ts
+        except Exception as e:
+            self.get_logger().error(f"Error in exo gyro callback: {str(e)}")
 
     def solve_callback(self, h_rgb: Image, h_depth: Image, e_rgb: Image, e_depth: Image):
         if "head" not in h_rgb.header.frame_id or "exo" not in e_rgb.header.frame_id:
@@ -256,7 +261,7 @@ class ExtrinsicSolverNode(Node):
                       (stamp_sec - self.last_solver_time) >= self.min_solver_interval)
 
         if not run_solver:
-            if self.current_t is not None:
+            if self.current_t is not None and not self.in_fallback:
                 self.broadcast_transform(e_rgb.header.stamp)
             return
 
@@ -358,13 +363,14 @@ class ExtrinsicSolverNode(Node):
                                     tj = self.max_trans_jump_moving if moving else self.max_trans_jump
                                     rj = self.max_rot_jump_moving if moving else self.max_rot_jump
 
-                                    if self.current_t is not None:
+                                    # Skip jump checks before first real solve (initial guess is arbitrary)
+                                    if self._has_real_solve:
                                         trans_jump = np.linalg.norm(new_t - self.current_t)
                                         if trans_jump > tj:
                                             status = 'REJECTED_TRANS_JUMP'
                                             valid = False
 
-                                    if valid and self.current_q is not None:
+                                    if valid and self._has_real_solve:
                                         dot = abs(np.dot(self.current_q, new_q))
                                         dot = min(1.0, max(0.0, dot))
                                         rot_jump = 2.0 * np.arccos(dot)
@@ -403,9 +409,11 @@ class ExtrinsicSolverNode(Node):
 
                                 if valid:
                                     status = 'SUCCESS'
-                                    if self.current_t is None:
+                                    if not self._has_real_solve:
+                                        # First real solve — snap directly, don't blend from initial guess
                                         self.current_t = new_t.copy()
                                         self.current_q = new_q.copy()
+                                        self._has_real_solve = True
                                     else:
                                         self.current_t = ((1.0 - self.tf_filter_alpha) * self.current_t +
                                                           self.tf_filter_alpha * new_t)
@@ -425,15 +433,30 @@ class ExtrinsicSolverNode(Node):
             self.get_logger().error(f"Solver exception: {str(e)}")
             status = f"ERROR_{type(e).__name__}"
 
-        if status not in ('SUCCESS', 'UNKNOWN', 'WAITING_FOR_CAMERA_INFO', 'WAITING_FOR_LINK_TF') \
-           and self.current_t is not None and self.gyro_propagation_enabled:
+        if status == 'SUCCESS':
+            self.in_fallback = False
+            self.gyro_propagation_start = None
+        elif status in ('UNKNOWN', 'WAITING_FOR_CAMERA_INFO', 'WAITING_FOR_LINK_TF'):
+            # Benign startup states — keep existing transform, don't enter fallback
+            pass
+        elif self.current_t is not None and self.gyro_propagation_enabled:
+            # Real solver failure with existing transform — try gyro propagation
             if self.gyro_propagation_start is None:
                 self.gyro_propagation_start = stamp_sec
             elapsed = stamp_sec - self.gyro_propagation_start
             if elapsed <= self.gyro_max_duration:
                 status = 'GYRO_PROPAGATED'
+                self.in_fallback = True
             else:
+                # Gyro timed out — hold last known transform, stop active propagation
+                self.in_fallback = False
                 self.gyro_propagation_start = None
+                self.get_logger().warn(
+                    'Gyro propagation timed out, holding last known transform',
+                    throttle_duration_sec=5.0)
+        else:
+            # No existing transform or gyro disabled — nothing to propagate
+            self.in_fallback = False
 
         imu_constraint_val = float(
             self.imu_gravity_enabled and self.head_gravity is not None and self.exo_gravity is not None)
@@ -445,7 +468,7 @@ class ExtrinsicSolverNode(Node):
                          gravity_error_deg=grav_err, is_stationary=stationary,
                          imu_constraint_applied=imu_constraint_val)
 
-        if self.current_t is not None:
+        if self.current_t is not None and not self.in_fallback:
             self.broadcast_transform(e_rgb.header.stamp)
 
     def broadcast_transform(self, stamp):
@@ -463,6 +486,10 @@ class ExtrinsicSolverNode(Node):
         msg.transform.rotation.z = float(self.current_q[2])
         msg.transform.rotation.w = float(self.current_q[3])
         self.tf_broadcaster.sendTransform(msg)
+
+    def gyro_broadcast_timer(self):
+        if self.current_t is not None:
+            self.broadcast_transform(self.get_clock().now().to_msg())
 
     def log_metrics(self, timestamp, num_2d, num_3d, inliers, ratio, rmse, status,
                     gravity_error_deg=np.nan, is_stationary=np.nan, imu_constraint_applied=np.nan):
@@ -503,10 +530,6 @@ class ExtrinsicSolverNode(Node):
                             t[0], t[1], t[2], q[0], q[1], q[2], q[3],
                             gt_t[0], gt_t[1], gt_t[2], gt_q[0], gt_q[1], gt_q[2], gt_q[3],
                             error_t, error_r_deg,
-                            gravity_error_deg, is_stationary, imu_constraint_applied])
-            with open(self.imu_csv_path, mode='a', newline='') as f:
-                w = csv.writer(f)
-                w.writerow([timestamp, num_2d, status,
                             gravity_error_deg, is_stationary, imu_constraint_applied])
         except Exception as e:
             self.get_logger().error(f"CSV write error: {str(e)}")

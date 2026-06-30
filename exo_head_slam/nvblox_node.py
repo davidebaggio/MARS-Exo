@@ -71,6 +71,7 @@ class NvbloxNode(Node):
         self.frame_count = 0
         self.mesh_vertices = None
         self.mesh_colors = None
+        self._last_poses = {}
 
         from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
         qos = QoSProfile(
@@ -133,9 +134,21 @@ class NvbloxNode(Node):
                 rclpy.duration.Duration(seconds=0.5)
             )
         except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as e:
-            self.get_logger().warn(f'TF lookup failed for {frame_id}: {str(e)}', throttle_duration_sec=10.0)
+            if frame_id in self._last_poses:
+                self.get_logger().warn(
+                    f'TF lookup failed for {frame_id}, using cached pose: {str(e)}',
+                    throttle_duration_sec=10.0)
+                return self._last_poses[frame_id]
+            self.get_logger().warn(
+                f'TF lookup failed for {frame_id}, no cached pose: {str(e)}',
+                throttle_duration_sec=10.0)
             return None
         except Exception as e:
+            if frame_id in self._last_poses:
+                self.get_logger().warn(
+                    f'Unexpected TF error for {frame_id}, using cached pose: {str(e)}',
+                    throttle_duration_sec=10.0)
+                return self._last_poses[frame_id]
             self.get_logger().error(f'Unexpected TF error: {str(e)}')
             return None
 
@@ -148,7 +161,9 @@ class NvbloxNode(Node):
         pose = np.eye(4, dtype=np.float32)
         pose[:3, :3] = rot
         pose[:3, 3] = t
-        return torch.from_numpy(pose)
+        pose_tensor = torch.from_numpy(pose)
+        self._last_poses[frame_id] = pose_tensor
+        return pose_tensor
 
     def _integrate_frame(self, depth_msg: Image, rgb_msg: Image, info_msg: CameraInfo, sensor_attr: str):
         try:

@@ -2,7 +2,6 @@ exo_depth_preprocessor:
   ros__parameters:
     input_depth_topic: "/camera/exo/aligned_depth_to_color/image_raw"
     output_depth_topic: "/exo/filtered/depth_raw"
-    expected_frame_id: "exo"
     depth_filter.enabled: true
     depth_filter.depth_unit_scale: 0.001
     depth_filter.spatial.kernel_size: 5
@@ -15,7 +14,6 @@ exo_semantic_masker:
   ros__parameters:
     input_rgb_topic: "/camera/exo/color/image_raw"
     input_depth_topic: "/exo/filtered/depth_raw"
-    expected_frame_id: "exo"
     output_rgb_topic: "/exo/masked/image_raw"
     output_depth_topic: "/exo/masked/depth_raw"
     masker.model_path: "yolov8n-seg.pt"
@@ -29,9 +27,6 @@ exo_nvblox:
     rgb_topic: "/exo/masked/image_raw"
     camera_info_topic: "/camera/exo/color/camera_info"
 
-extrinsic_solver:
-  ros__parameters:
-    exo_height_m: 0.95
 
 exo_rtabmap:
   ros__parameters:
@@ -40,12 +35,12 @@ exo_rtabmap:
     map_frame_id: "map"
     odom_frame_id: "odom"
     publish_tf: true
-    subscribe_odom_info: true
+    subscribe_odom_info: false
     approx_sync: true
     approx_sync_max_interval: 0.02
     queue_size: 100
     sync_queue_size: 100
-    wait_for_transform: 0.2
+    wait_for_transform: 1.0
     rgb_topic: "/exo/masked/image_raw"
     depth_topic: "/exo/masked/depth_raw"
     camera_info_topic: "/camera/exo/color/camera_info"
@@ -55,7 +50,7 @@ exo_rtabmap:
     Grid/MaxObstacleHeight: "2.0"
     Odom/Strategy: "0" # Frame-to-Map
     Vis/EstimationType: "0" # 3D->2D (PnP)
-    Vis/MinInliers: "6"
+    Vis/MinInliers: "12"
     Vis/InlierDistance: "0.1"
     Vis/CorGuessWinSize: "0"
     Vis/FeatureType: "8" # GFTT/ORB
@@ -64,7 +59,7 @@ exo_rtabmap:
     Rtabmap/DetectionRate: "0"
     RGBD/LinearUpdate: "0.01"
     RGBD/AngularUpdate: "0.01"
-    RGBD/OptimizeMaxError: "0.1"
+    RGBD/OptimizeMaxError: "1.0"
 
 exo_rgbd_odometry:
   ros__parameters:
@@ -77,13 +72,3 @@ exo_rgbd_odometry:
     lightglue_device: "cuda"
     lightglue_max_keypoints: 2048
 
-exo_imu_processor:
-  ros__parameters:
-    head_imu_topic: "/camera/head/imu"
-    exo_imu_topic: "/camera/exo/imu"
-    window_size: 100
-    gravity_alpha: 0.1
-    motion_gyro_threshold: 0.3
-    motion_accel_var_threshold: 0.5
-    bias_estimation_samples: 100
-    process_rate_hz: 10.0

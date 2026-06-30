@@ -122,14 +122,58 @@ def generate_launch_description():
         package='tf2_ros',
         executable='static_transform_publisher',
         name='static_tf_exo_link',
-        arguments=['0', '0', '0', '0', '0', '0', 'exo_link', 'exo_camera_link']
+        arguments=['--x', '0', '--y', '0', '--z', '0', '--yaw', '0', '--pitch', '0', '--roll', '0', '--frame-id', 'exo_link', '--child-frame-id', 'exo_camera_link']
     )
 
     static_tf_head = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
         name='static_tf_head_link',
-        arguments=['0', '0', '0', '0', '0', '0', 'head_link', 'head_camera_link']
+        arguments=['--x', '0', '--y', '0', '--z', '0', '--yaw', '0', '--pitch', '0', '--roll', '0', '--frame-id', 'head_link', '--child-frame-id', 'head_camera_link']
+    )
+
+    static_tf_exo_color = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='static_tf_exo_color',
+        arguments=['--x', '-0.000374', '--y', '0.014791', '--z', '0.000141',
+                   '--qx', '0.005959', '--qy', '0.002870', '--qz', '-0.001444', '--qw', '0.999977',
+                   '--frame-id', 'exo_link', '--child-frame-id', 'exo_color_frame']
+    )
+
+    static_tf_exo_optical = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='static_tf_exo_optical',
+        arguments=['--x', '0', '--y', '0', '--z', '0',
+                   '--qx', '-0.5', '--qy', '0.5', '--qz', '-0.5', '--qw', '0.5',
+                   '--frame-id', 'exo_color_frame', '--child-frame-id', 'exo_color_optical_frame']
+    )
+
+    static_tf_head_color = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='static_tf_head_color',
+        arguments=['--x', '-0.000417', '--y', '0.014662', '--z', '-0.000104',
+                   '--qx', '-0.004870', '--qy', '-0.000842', '--qz', '0.000748', '--qw', '0.999987',
+                   '--frame-id', 'head_link', '--child-frame-id', 'head_color_frame']
+    )
+
+    static_tf_head_optical = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='static_tf_head_optical',
+        arguments=['--x', '0', '--y', '0', '--z', '0',
+                   '--qx', '-0.5', '--qy', '0.5', '--qz', '-0.5', '--qw', '0.5',
+                   '--frame-id', 'head_color_frame', '--child-frame-id', 'head_color_optical_frame']
+    )
+
+    # Identity default for map→odom; RTAB-Map dynamic corrections override once running
+    static_tf_map_odom = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='static_tf_map_odom',
+        arguments=['--x', '0', '--y', '0', '--z', '0', '--yaw', '0', '--pitch', '0', '--roll', '0', '--frame-id', 'map', '--child-frame-id', 'odom']
     )
 
     actions = [
@@ -138,6 +182,11 @@ def generate_launch_description():
         global_frame_arg,
         static_tf_exo,
         static_tf_head,
+        static_tf_exo_color,
+        static_tf_exo_optical,
+        static_tf_head_color,
+        static_tf_head_optical,
+        static_tf_map_odom,
         head_depth_preprocessor,
         exo_depth_preprocessor,
         head_masker,

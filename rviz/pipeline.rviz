@@ -71,7 +71,7 @@ Visualization Manager:
       Value: true
     - Class: rviz_default_plugins/PointCloud2
       Color Transformer: RGB8
-      Enabled: false
+      Enabled: true
       Name: HeadDebugCloud
       Size (Pixels): 3
       Topic:
@@ -83,7 +83,7 @@ Visualization Manager:
       Value: true
     - Class: rviz_default_plugins/PointCloud2
       Color Transformer: RGB8
-      Enabled: false
+      Enabled: true
       Name: ExoDebugCloud
       Size (Pixels): 3
       Topic:
@@ -122,7 +122,7 @@ Visualization Manager:
       Value: true
     - Class: rviz_default_plugins/PointCloud2
       Color Transformer: RGB8
-      Enabled: true
+      Enabled: false
       Name: NvbloxCloud
       Size (Pixels): 3
       Topic:
@@ -133,7 +133,7 @@ Visualization Manager:
         Value: /nvblox/pointcloud
       Value: true
     - Class: rviz_default_plugins/Marker
-      Enabled: true
+      Enabled: false
       Name: NvbloxMesh
       Topic:
         Depth: 5
