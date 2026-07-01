@@ -48,7 +48,8 @@ if [ -d "install/exo_head_slam/lib/exo_head_slam" ]; then
 fi
 
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-METRICS_CSV="metrics_${TIMESTAMP}.csv"
+mkdir -p metrics/pipeline
+METRICS_CSV="metrics/pipeline/metrics_${TIMESTAMP}.csv"
 echo "Logging metrics to: $METRICS_CSV"
 
 ros2 launch exo_head_slam main_pipeline_launch.py use_sim_time:=true publish_debug_pcl:=true global_frame:=odom metrics_csv_path:="$METRICS_CSV" &

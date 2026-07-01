@@ -253,6 +253,21 @@ class ExtrinsicSolverNode(Node):
                 e_msg.header = e_depth.header
                 self.exo_combined_depth_pub.publish(e_msg)
 
+                # Calculate depth estimation metrics (predicted vs raw metric depth)
+                head_depth_rmse = None
+                head_depth_mae = None
+                if np.sum(h_valid) > 0:
+                    h_diff = h_pred_orig_scaled[h_valid] - head_dep[h_valid]
+                    head_depth_rmse = float(np.sqrt(np.mean(h_diff ** 2)))
+                    head_depth_mae = float(np.mean(np.abs(h_diff)))
+
+                exo_depth_rmse = None
+                exo_depth_mae = None
+                if np.sum(e_valid) > 0:
+                    e_diff = e_pred_orig_scaled[e_valid] - exo_dep[e_valid]
+                    exo_depth_rmse = float(np.sqrt(np.mean(e_diff ** 2)))
+                    exo_depth_mae = float(np.mean(np.abs(e_diff)))
+
                 # Publish VGGT Point Cloud map
                 h_pts = point_map_by_unprojection[0]
                 e_pts = point_map_by_unprojection[1]
@@ -305,18 +320,27 @@ class ExtrinsicSolverNode(Node):
                     if not (0.2 <= dist <= 2.2):
                         self.get_logger().warn(f"Rejecting transform: distance {dist:.2f} m out of bounds [0.2, 2.2]")
                         valid_tf = False
-                        self.log_metrics(stamp_sec, 'OUT_OF_BOUNDS', scale=scale, new_t=new_t, new_q=new_q)
+                        self.log_metrics(stamp_sec, 'OUT_OF_BOUNDS', scale=scale, 
+                                         head_depth_rmse=head_depth_rmse, head_depth_mae=head_depth_mae, 
+                                         exo_depth_rmse=exo_depth_rmse, exo_depth_mae=exo_depth_mae, 
+                                         new_t=new_t, new_q=new_q)
                     elif not (0.1 <= new_t[2] <= 1.5):
                         self.get_logger().warn(f"Rejecting transform: relative Z height {new_t[2]:.2f} m out of bounds [0.1, 1.5]")
                         valid_tf = False
-                        self.log_metrics(stamp_sec, 'OUT_OF_BOUNDS', scale=scale, new_t=new_t, new_q=new_q)
+                        self.log_metrics(stamp_sec, 'OUT_OF_BOUNDS', scale=scale, 
+                                         head_depth_rmse=head_depth_rmse, head_depth_mae=head_depth_mae, 
+                                         exo_depth_rmse=exo_depth_rmse, exo_depth_mae=exo_depth_mae, 
+                                         new_t=new_t, new_q=new_q)
 
                     if valid_tf and self.last_solver_time is not None:
                         trans_jump = np.linalg.norm(new_t - self.current_t)
                         if trans_jump > self.max_trans_jump:
                             self.get_logger().warn(f"Rejecting transform due to translation jump: {trans_jump:.3f} m > {self.max_trans_jump} m")
                             valid_tf = False
-                            self.log_metrics(stamp_sec, 'TRANSLATION_JUMP', scale=scale, new_t=new_t, new_q=new_q)
+                            self.log_metrics(stamp_sec, 'TRANSLATION_JUMP', scale=scale, 
+                                             head_depth_rmse=head_depth_rmse, head_depth_mae=head_depth_mae, 
+                                             exo_depth_rmse=exo_depth_rmse, exo_depth_mae=exo_depth_mae, 
+                                             new_t=new_t, new_q=new_q)
 
                     if valid_tf and self.last_solver_time is not None:
                         dot_product = abs(np.dot(self.current_q, new_q))
@@ -325,7 +349,10 @@ class ExtrinsicSolverNode(Node):
                         if rot_jump > self.max_rot_jump:
                             self.get_logger().warn(f"Rejecting transform due to rotation jump: {rot_jump:.3f} rad > {self.max_rot_jump} rad")
                             valid_tf = False
-                            self.log_metrics(stamp_sec, 'ROTATION_JUMP', scale=scale, new_t=new_t, new_q=new_q)
+                            self.log_metrics(stamp_sec, 'ROTATION_JUMP', scale=scale, 
+                                             head_depth_rmse=head_depth_rmse, head_depth_mae=head_depth_mae, 
+                                             exo_depth_rmse=exo_depth_rmse, exo_depth_mae=exo_depth_mae, 
+                                             new_t=new_t, new_q=new_q)
 
                     if valid_tf:
                         # EMA Filtering
@@ -352,15 +379,24 @@ class ExtrinsicSolverNode(Node):
                             f"q=[{self.current_q[0]:.3f}, {self.current_q[1]:.3f}, {self.current_q[2]:.3f}, {self.current_q[3]:.3f}]"
                         )
                         self.last_solver_time = stamp_sec
-                        self.log_metrics(stamp_sec, 'SUCCESS', scale=scale, new_t=self.current_t, new_q=self.current_q)
+                        self.log_metrics(stamp_sec, 'SUCCESS', scale=scale, 
+                                         head_depth_rmse=head_depth_rmse, head_depth_mae=head_depth_mae, 
+                                         exo_depth_rmse=exo_depth_rmse, exo_depth_mae=exo_depth_mae, 
+                                         new_t=self.current_t, new_q=self.current_q)
 
                 except Exception as e:
                     self.get_logger().warn(f"TF Lookup failed: {str(e)}")
-                    self.log_metrics(stamp_sec, 'TF_LOOKUP_ERROR', scale=scale)
+                    self.log_metrics(stamp_sec, 'TF_LOOKUP_ERROR', scale=scale, 
+                                     head_depth_rmse=head_depth_rmse, head_depth_mae=head_depth_mae, 
+                                     exo_depth_rmse=exo_depth_rmse, exo_depth_mae=exo_depth_mae)
 
             except Exception as e:
                 self.get_logger().error(f"VGGT extrinsic solver callback failed: {str(e)}")
-                self.log_metrics(stamp_sec, 'SOLVER_ERROR', scale=scale if 'scale' in locals() else 1.0)
+                self.log_metrics(stamp_sec, 'SOLVER_ERROR', scale=scale if 'scale' in locals() else 1.0, 
+                                 head_depth_rmse=head_depth_rmse if 'head_depth_rmse' in locals() else None, 
+                                 head_depth_mae=head_depth_mae if 'head_depth_mae' in locals() else None, 
+                                 exo_depth_rmse=exo_depth_rmse if 'exo_depth_rmse' in locals() else None, 
+                                 exo_depth_mae=exo_depth_mae if 'exo_depth_mae' in locals() else None)
 
         # Always broadcast the last known good transforms to keep TF tree active
         if self.current_t is not None:
@@ -475,7 +511,11 @@ class ExtrinsicSolverNode(Node):
         self.tf_broadcaster.sendTransform(t_msg)
 
 
-    def log_metrics(self, stamp_sec, status, scale=1.0, num_2d_matches=0, num_3d_matches=0, inliers=0, rmse=0.0, inlier_ratio=0.0, new_t=None, new_q=None):
+    def log_metrics(self, stamp_sec, status, scale=1.0, 
+                    head_depth_rmse=None, head_depth_mae=None, 
+                    exo_depth_rmse=None, exo_depth_mae=None, 
+                    num_2d_matches=0, num_3d_matches=0, inliers=0, rmse=0.0, inlier_ratio=0.0, 
+                    new_t=None, new_q=None):
         if not self.metrics_enabled:
             return
 
@@ -512,17 +552,24 @@ class ExtrinsicSolverNode(Node):
                 self.get_logger().warn(f"Failed to lookup GT transform for metrics: {str(e)}")
 
         import csv
+        dirname = os.path.dirname(self.metrics_csv_path)
+        if dirname:
+            os.makedirs(dirname, exist_ok=True)
         file_exists = os.path.exists(self.metrics_csv_path)
         try:
             with open(self.metrics_csv_path, mode='a', newline='') as f:
                 writer = csv.writer(f)
                 if not file_exists:
                     writer.writerow([
-                        'timestamp', 'status', 'scale', 'num_2d_matches', 'num_3d_matches', 'inliers', 'rmse', 'inlier_ratio',
+                        'timestamp', 'status', 'scale', 
+                        'head_depth_rmse', 'head_depth_mae', 'exo_depth_rmse', 'exo_depth_mae',
+                        'num_2d_matches', 'num_3d_matches', 'inliers', 'rmse', 'inlier_ratio',
                         't_x', 't_y', 't_z', 'gt_t_x', 'gt_t_y', 'gt_t_z', 'error_t', 'error_r_deg'
                     ])
                 writer.writerow([
-                    stamp_sec, status, scale, num_2d_matches, num_3d_matches, inliers, rmse, inlier_ratio,
+                    stamp_sec, status, scale, 
+                    head_depth_rmse, head_depth_mae, exo_depth_rmse, exo_depth_mae,
+                    num_2d_matches, num_3d_matches, inliers, rmse, inlier_ratio,
                     t_x, t_y, t_z, gt_t_x, gt_t_y, gt_t_z, error_t, error_r_deg
                 ])
         except Exception as e:
