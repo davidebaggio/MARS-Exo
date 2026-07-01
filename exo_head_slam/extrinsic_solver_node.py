@@ -46,6 +46,7 @@ class ExtrinsicSolverNode(Node):
         self.declare_parameter('head_frame_id', 'head_link')
         self.declare_parameter('exo_frame_id', 'exo_link')
         self.declare_parameter('tf_filter_alpha', 0.5)
+        self.declare_parameter('sliding_window_size', 2)
         self.declare_parameter('min_solver_interval', 0.2)
         self.declare_parameter('max_trans_jump', 0.3)
         self.declare_parameter('max_rot_jump', 0.5)
@@ -64,6 +65,7 @@ class ExtrinsicSolverNode(Node):
         self.head_frame_id = self.get_parameter('head_frame_id').value
         self.exo_frame_id = self.get_parameter('exo_frame_id').value
         self.tf_filter_alpha = float(self.get_parameter('tf_filter_alpha').value)
+        self.sliding_window_size = int(self.get_parameter('sliding_window_size').value)
         self.min_solver_interval = float(self.get_parameter('min_solver_interval').value)
         self.max_trans_jump = float(self.get_parameter('max_trans_jump').value)
         self.max_rot_jump = float(self.get_parameter('max_rot_jump').value)
@@ -71,17 +73,18 @@ class ExtrinsicSolverNode(Node):
         self.metrics_csv_path = self.get_parameter('metrics_csv_path').value
         self.gt_parent_frame = self.get_parameter('gt_parent_frame').value
         self.gt_child_frame = self.get_parameter('gt_child_frame').value
-
+ 
         self.bridge = CvBridge()
         self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
-
+ 
         # State
         self.current_t = np.array([-0.3, 0.0, 0.5])
         self.current_q = np.array([0.0, 0.0, 0.0, 1.0])
         self.current_vggt_world_t = np.array([-0.3, 0.0, 0.5])
         self.current_vggt_world_q = np.array([0.0, 0.0, 0.0, 1.0])
+        self.image_buffer = []  # sliding window buffer of (h_tensor, e_tensor)
         self.last_solver_time = None
 
         # Publishers
@@ -176,8 +179,17 @@ class ExtrinsicSolverNode(Node):
                 h_tensor, h_orig_h, h_orig_w, h_new_h, h_crop_y = self.preprocess_cv2_image(head_img)
                 e_tensor, e_orig_h, e_orig_w, e_new_h, e_crop_y = self.preprocess_cv2_image(exo_img)
 
-                # Batch size 1, sequence length 2
-                images = torch.stack([h_tensor, e_tensor]).unsqueeze(0).to(self.device)
+                # Append to sliding window buffer
+                self.image_buffer.append((h_tensor, e_tensor))
+                if len(self.image_buffer) > self.sliding_window_size:
+                    self.image_buffer.pop(0)
+
+                # Stack all frame pairs in buffer
+                all_tensors = []
+                for hb, eb in self.image_buffer:
+                    all_tensors.extend([hb, eb])
+                images = torch.stack(all_tensors).unsqueeze(0).to(self.device)
+                M = len(self.image_buffer)
 
                 with torch.no_grad():
                     with self.autocast_ctx:
@@ -191,13 +203,15 @@ class ExtrinsicSolverNode(Node):
                             intrinsic.squeeze(0).float()
                         )
 
-                # Get cameras
-                E_head = extrinsic[0, 0].cpu().float().numpy()  # (3, 4)
-                E_exo = extrinsic[0, 1].cpu().float().numpy()   # (3, 4)
+                # Get latest camera matrices
+                E_head = extrinsic[0, 2 * M - 2].cpu().float().numpy()  # (3, 4)
+                E_exo = extrinsic[0, 2 * M - 1].cpu().float().numpy()   # (3, 4)
 
-                # Get depth maps
-                h_pred_depth = depth_map[0, 0, ..., 0].cpu().float().numpy()  # (H, W)
-                e_pred_depth = depth_map[0, 1, ..., 0].cpu().float().numpy()  # (H, W)
+                # Get latest predicted depth maps
+                h_pred_depth = depth_map[0, 2 * M - 2, ..., 0].cpu().float().numpy()  # (H, W)
+                e_pred_depth = depth_map[0, 2 * M - 1, ..., 0].cpu().float().numpy()  # (H, W)
+
+                self.get_logger().info(f"DEBUG SHAPES: depth_map={depth_map.shape}, h_pred_depth={h_pred_depth.shape}, point_map={point_map_by_unprojection.shape}")
 
                 # Postprocess depth maps back to original dimensions
                 h_pred_orig = self.postprocess_depth(h_pred_depth, h_orig_h, h_orig_w, h_new_h, h_crop_y)
@@ -269,11 +283,11 @@ class ExtrinsicSolverNode(Node):
                     exo_depth_mae = float(np.mean(np.abs(e_diff)))
 
                 # Publish VGGT Point Cloud map
-                h_pts = point_map_by_unprojection[0]
-                e_pts = point_map_by_unprojection[1]
+                h_pts = point_map_by_unprojection[2 * M - 2]
+                e_pts = point_map_by_unprojection[2 * M - 1]
                 h_color = (h_tensor.permute(1, 2, 0).cpu().numpy() * 255.0).astype(np.uint8)
                 e_color = (e_tensor.permute(1, 2, 0).cpu().numpy() * 255.0).astype(np.uint8)
-                self.publish_vggt_pointcloud(h_pts, e_pts, h_color, e_color, h_pred_depth, e_pred_depth, scale, h_rgb.header.stamp)
+                self.publish_vggt_pointcloud(h_pts, e_pts, h_color, e_color, h_pred_depth, e_pred_depth, scale, e_rgb.header.stamp)
 
                 # Compute relative extrinsic camera pose
                 T_head = np.eye(4)
@@ -392,6 +406,9 @@ class ExtrinsicSolverNode(Node):
 
             except Exception as e:
                 self.get_logger().error(f"VGGT extrinsic solver callback failed: {str(e)}")
+                self.image_buffer.clear()
+                if self.device == "cuda":
+                    torch.cuda.empty_cache()
                 self.log_metrics(stamp_sec, 'SOLVER_ERROR', scale=scale if 'scale' in locals() else 1.0, 
                                  head_depth_rmse=head_depth_rmse if 'head_depth_rmse' in locals() else None, 
                                  head_depth_mae=head_depth_mae if 'head_depth_mae' in locals() else None, 
@@ -403,6 +420,10 @@ class ExtrinsicSolverNode(Node):
             self.broadcast_transform(e_rgb.header.stamp)
         if self.current_vggt_world_t is not None:
             self.broadcast_vggt_world_transform(e_rgb.header.stamp)
+
+        # Clear CUDA cache to prevent VRAM accumulation
+        if self.device == "cuda":
+            torch.cuda.empty_cache()
 
     def publish_vggt_pointcloud(self, h_pts, e_pts, h_color, e_color, h_pred_depth, e_pred_depth, scale, stamp):
         h_pts_metric = h_pts * scale
@@ -420,7 +441,10 @@ class ExtrinsicSolverNode(Node):
         e_pts_valid = e_pts_metric[e_valid]
         e_color_valid = e_color[e_valid]
 
+        self.get_logger().info(f"DEBUG PCL: h_pts={h_pts.shape}, h_color={h_color.shape}, h_depth_scaled min={h_depth_scaled.min():.3f} max={h_depth_scaled.max():.3f}, valid_h={np.sum(h_valid)}, valid_e={np.sum(e_valid)}")
+
         if len(h_pts_valid) == 0 and len(e_pts_valid) == 0:
+            self.get_logger().warn("DEBUG PCL: no valid points! Returning early.")
             return
 
         all_pts = np.vstack([h_pts_valid, e_pts_valid])
