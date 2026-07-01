@@ -71,7 +71,7 @@ class ExtrinsicSolverNode(Node):
 
         self.tf_filter_alpha = float(self.get_parameter('tf_filter_alpha').value)
         # Initial guess: head ~30cm above exo. Keeps TF tree connected before first solve.
-        self.current_t: np.ndarray = np.array([0.0, 0.0, 0.3])
+        self.current_t: np.ndarray = np.array([0.0, 0.0, 0.7])
         self.current_q: np.ndarray = np.array([0.0, 0.0, 0.0, 1.0])
         self._has_real_solve = False  # True after first successful visual solve
 

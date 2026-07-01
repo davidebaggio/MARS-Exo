@@ -4,7 +4,9 @@ from sensor_msgs.msg import Image, CameraInfo, PointCloud2, PointField
 from cv_bridge import CvBridge
 import numpy as np
 import message_filters
-# ponytail: Removed tf2_ros and scipy.spatial.transform dependencies
+import tf2_ros
+from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
+from geometry_msgs.msg import TransformStamped
 
 
 class PointCloudPublisherNode(Node):
@@ -30,8 +32,8 @@ class PointCloudPublisherNode(Node):
             return
 
         self.bridge = CvBridge()
-        # ponytail: Removed tf buffer/listener to prevent Python TF lookup failures
-
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
         # Sync subscribers
         self.rgb_sub = message_filters.Subscriber(self, Image, self.input_rgb_topic)
@@ -106,9 +108,28 @@ class PointCloudPublisherNode(Node):
             y = (v - cy) * z / fy
             points_cam = np.vstack((x, y, z)).T 
 
-            # ponytail: Use points directly in the local camera frame without Python TF lookups
-            points_local = points_cam
-
+            try:
+                transform = self.tf_buffer.lookup_transform(
+                    self.global_frame,
+                    depth_msg.header.frame_id,
+                    rclpy.time.Time(),
+                    rclpy.duration.Duration(seconds=0.5)
+                )
+                q = [transform.transform.rotation.x, transform.transform.rotation.y,
+                     transform.transform.rotation.z, transform.transform.rotation.w]
+                t = [transform.transform.translation.x, transform.transform.translation.y,
+                     transform.transform.translation.z]
+                from scipy.spatial.transform import Rotation as R
+                rot = R.from_quat(q).as_matrix()
+                points_local = (rot @ points_cam.T).T + t
+                output_frame = self.global_frame
+            except (LookupException, ConnectivityException, ExtrapolationException) as e:
+                self.get_logger().warn(
+                    f'TF lookup {self.global_frame}->{depth_msg.header.frame_id} failed: {e}, publishing in camera frame',
+                    throttle_duration_sec=5.0
+                )
+                points_local = points_cam
+                output_frame = depth_msg.header.frame_id
 
             # 6. Create PointCloud2 (Packed XYZRGB)
             num_points = len(points_local)
@@ -130,7 +151,7 @@ class PointCloudPublisherNode(Node):
 
             pcl_msg = PointCloud2()
             pcl_msg.header = rgb_msg.header
-            pcl_msg.header.frame_id = depth_msg.header.frame_id
+            pcl_msg.header.frame_id = output_frame
             pcl_msg.height = 1
             pcl_msg.width = num_points
             pcl_msg.is_dense = False

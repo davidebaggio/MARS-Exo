@@ -25,8 +25,10 @@ def generate_launch_description():
     config_dir = os.path.join(get_package_share_directory('exo_head_slam'), 'config')
     head_config_path = os.path.join(config_dir, 'head.yaml')
     exo_config_path = os.path.join(config_dir, 'exo.yaml')
+    common_config_path = os.path.join(config_dir, 'common.yaml')
     head_params = load_section(head_config_path, 'head_nvblox')
     exo_params = load_section(exo_config_path, 'exo_nvblox')
+    slam_params = load_section(common_config_path, 'slam')
 
     global_frame_arg = DeclareLaunchArgument(
         'global_frame',
@@ -49,6 +51,11 @@ def generate_launch_description():
         'exo_depth_topic': exo_params['depth_topic'],
         'exo_rgb_topic': exo_params['rgb_topic'],
         'exo_camera_info_topic': exo_params['camera_info_topic'],
+        'icp_enabled': slam_params.get('icp_enabled', False),
+        'icp_track_every_n': slam_params.get('icp_track_every_n', 3),
+        'icp_max_iterations': slam_params.get('icp_max_iterations', 20),
+        'icp_max_correspondence_dist': slam_params.get('icp_max_correspondence_dist', 0.05),
+        'icp_sampling_step': slam_params.get('icp_sampling_step', 4),
         'use_sim_time': use_sim_time,
     }
 

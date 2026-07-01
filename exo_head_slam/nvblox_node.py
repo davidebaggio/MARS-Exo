@@ -16,6 +16,11 @@ from nvblox_torch.mapper_params import MapperParams, ProjectiveIntegratorParams
 from nvblox_torch.projective_integrator_types import ProjectiveIntegratorType
 from nvblox_torch.sensor import Sensor
 
+import threading
+import queue
+from typing import Optional
+from nvblox_torch.rendering import render_depth_image
+
 
 class NvbloxNode(Node):
     def __init__(self):
@@ -35,6 +40,11 @@ class NvbloxNode(Node):
         self.declare_parameter('exo_depth_topic', '/exo/masked/depth_raw')
         self.declare_parameter('exo_rgb_topic', '/exo/masked/image_raw')
         self.declare_parameter('exo_camera_info_topic', '/camera/exo/color/camera_info')
+        self.declare_parameter('icp_enabled', False)
+        self.declare_parameter('icp_track_every_n', 3)
+        self.declare_parameter('icp_max_iterations', 20)
+        self.declare_parameter('icp_max_correspondence_dist', 0.05)
+        self.declare_parameter('icp_sampling_step', 4)
 
         self.global_frame = self.get_parameter('global_frame').value
         self.voxel_size_m = float(self.get_parameter('voxel_size_m').value)
@@ -50,6 +60,12 @@ class NvbloxNode(Node):
         self.exo_depth_topic = self.get_parameter('exo_depth_topic').value
         self.exo_rgb_topic = self.get_parameter('exo_rgb_topic').value
         self.exo_camera_info_topic = self.get_parameter('exo_camera_info_topic').value
+
+        self.icp_enabled = bool(self.get_parameter('icp_enabled').value)
+        self.icp_track_every_n = int(self.get_parameter('icp_track_every_n').value)
+        self.icp_max_iterations = int(self.get_parameter('icp_max_iterations').value)
+        self.icp_max_correspondence_dist = float(self.get_parameter('icp_max_correspondence_dist').value)
+        self.icp_sampling_step = int(self.get_parameter('icp_sampling_step').value)
 
         self.bridge = CvBridge()
         self.tf_buffer = tf2_ros.Buffer()
@@ -73,6 +89,21 @@ class NvbloxNode(Node):
         self.mesh_colors = None
         self._last_poses = {}
 
+        self.icp_lock = threading.Lock()
+        self.icp_pose_queue = queue.Queue()
+        self.icp_result_queue = queue.Queue()
+        self.icp_running = True
+        self.icp_current_pose = torch.eye(4).float()
+        self.icp_frame_count = 0
+        self.icp_first_pose = True
+        self._icp_render_height = 240
+        self._icp_render_width = 320
+
+        if self.icp_enabled:
+            self.icp_thread = threading.Thread(target=self._icp_loop, daemon=True)
+            self.icp_thread.start()
+            self.get_logger().info('  -> ICP tracking enabled')
+
         from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
         qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT, # Often needed for high-bw streams
@@ -88,24 +119,17 @@ class NvbloxNode(Node):
         self.head_depth_sub = message_filters.Subscriber(self, Image, self.head_depth_topic, qos_profile=qos)
         self.head_rgb_sub = message_filters.Subscriber(self, Image, self.head_rgb_topic, qos_profile=qos)
         self.head_info_sub = message_filters.Subscriber(self, CameraInfo, self.head_camera_info_topic, qos_profile=qos)
-
-        self.head_ts = message_filters.ApproximateTimeSynchronizer(
-            [self.head_depth_sub, self.head_rgb_sub, self.head_info_sub],
-            queue_size=100,
-            slop=0.1
-        )
-        self.head_ts.registerCallback(self.head_callback)
-
         self.exo_depth_sub = message_filters.Subscriber(self, Image, self.exo_depth_topic, qos_profile=qos)
         self.exo_rgb_sub = message_filters.Subscriber(self, Image, self.exo_rgb_topic, qos_profile=qos)
         self.exo_info_sub = message_filters.Subscriber(self, CameraInfo, self.exo_camera_info_topic, qos_profile=qos)
 
-        self.exo_ts = message_filters.ApproximateTimeSynchronizer(
-            [self.exo_depth_sub, self.exo_rgb_sub, self.exo_info_sub],
+        self.sync = message_filters.ApproximateTimeSynchronizer(
+            [self.head_depth_sub, self.head_rgb_sub, self.head_info_sub,
+             self.exo_depth_sub, self.exo_rgb_sub, self.exo_info_sub],
             queue_size=100,
             slop=0.1
         )
-        self.exo_ts.registerCallback(self.exo_callback)
+        self.sync.registerCallback(self.sync_callback)
 
         self.mesh_pub = self.create_publisher(Marker, '/nvblox/mesh', pub_qos)
         self.pcl_pub = self.create_publisher(PointCloud2, '/nvblox/pointcloud', pub_qos)
@@ -130,7 +154,7 @@ class NvbloxNode(Node):
             transform = self.tf_buffer.lookup_transform(
                 self.global_frame,
                 frame_id,
-                stamp,
+                rclpy.time.Time(),
                 rclpy.duration.Duration(seconds=0.5)
             )
         except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as e:
@@ -165,7 +189,7 @@ class NvbloxNode(Node):
         self._last_poses[frame_id] = pose_tensor
         return pose_tensor
 
-    def _integrate_frame(self, depth_msg: Image, rgb_msg: Image, info_msg: CameraInfo, sensor_attr: str):
+    def _integrate_frame(self, depth_msg: Image, rgb_msg: Image, info_msg: CameraInfo, sensor_attr: str, enable_icp: bool = True, pose_override: Optional[torch.Tensor] = None):
         try:
             depth_cv = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1').copy()
             rgb_cv = self.bridge.imgmsg_to_cv2(rgb_msg, desired_encoding='rgb8').copy()
@@ -177,12 +201,45 @@ class NvbloxNode(Node):
                 sensor = self._create_sensor(info_msg)
                 setattr(self, sensor_attr, sensor)
 
-            pose = self._get_pose(depth_msg.header.frame_id, depth_msg.header.stamp)
-            if pose is None:
-                return
+            if pose_override is not None:
+                pose = pose_override
+                depth_gpu = torch.from_numpy(depth_cv).float().cuda()
+                rgb_gpu = torch.from_numpy(rgb_cv).byte().cuda()
+            elif self.icp_enabled and enable_icp:
+                self.icp_frame_count += 1
+                K = np.array(info_msg.k).reshape(3, 3).astype(np.float32)
+                K_tensor = torch.from_numpy(K).float()
+                depth_gpu = torch.from_numpy(depth_cv).float().cuda()
+                rgb_gpu = torch.from_numpy(rgb_cv).byte().cuda()
+                sensor_height = info_msg.height
+                sensor_width = info_msg.width
 
-            depth_gpu = torch.from_numpy(depth_cv).float().cuda()
-            rgb_gpu = torch.from_numpy(rgb_cv).byte().cuda()
+                if self.icp_first_pose:
+                    pose = self._get_pose(depth_msg.header.frame_id, depth_msg.header.stamp)
+                    if pose is not None:
+                        self.icp_current_pose = pose
+                    self.icp_first_pose = False
+
+                if (self.icp_frame_count % self.icp_track_every_n) == 0:
+                    frame_id = depth_msg.header.frame_id
+                    self.icp_pose_queue.put((depth_gpu, K_tensor, sensor_height, sensor_width, frame_id))
+                    try:
+                        refined_pose = self.icp_result_queue.get(timeout=0.5)
+                        if refined_pose is not None:
+                            self.icp_current_pose = refined_pose
+                            pose = refined_pose
+                        else:
+                            pose = self.icp_current_pose
+                    except queue.Empty:
+                        pose = self.icp_current_pose
+                else:
+                    pose = self.icp_current_pose
+            else:
+                pose = self._get_pose(depth_msg.header.frame_id, depth_msg.header.stamp)
+                if pose is None:
+                    return
+                depth_gpu = torch.from_numpy(depth_cv).float().cuda()
+                rgb_gpu = torch.from_numpy(rgb_cv).byte().cuda()
 
             self.mapper.add_depth_frame(depth_gpu, pose, sensor)
             self.mapper.add_color_frame(rgb_gpu, pose, sensor)
@@ -194,11 +251,142 @@ class NvbloxNode(Node):
         except Exception as e:
             self.get_logger().error(f'[{self.instance_id}] Integration error: {str(e)}')
 
-    def head_callback(self, depth_msg: Image, rgb_msg: Image, info_msg: CameraInfo):
-        self._integrate_frame(depth_msg, rgb_msg, info_msg, 'head_sensor')
+    def _head_pose_from_icp(self, head_frame_id: str) -> Optional[torch.Tensor]:
+        try:
+            tf = self.tf_buffer.lookup_transform(
+                'exo_color_optical_frame', head_frame_id,
+                rclpy.time.Time(),
+                rclpy.duration.Duration(seconds=0.5))
+            q = [tf.transform.rotation.x, tf.transform.rotation.y,
+                 tf.transform.rotation.z, tf.transform.rotation.w]
+            t = [tf.transform.translation.x, tf.transform.translation.y,
+                 tf.transform.translation.z]
+            T_rel = torch.eye(4, device='cuda')
+            T_rel[:3, :3] = torch.from_numpy(R.from_quat(q).as_matrix()).float().to('cuda')
+            T_rel[:3, 3] = torch.tensor(t, device='cuda')
+            return self.icp_current_pose @ T_rel
+        except Exception:
+            return None
 
-    def exo_callback(self, depth_msg: Image, rgb_msg: Image, info_msg: CameraInfo):
-        self._integrate_frame(depth_msg, rgb_msg, info_msg, 'exo_sensor')
+    def _icp_loop(self):
+        while self.icp_running and rclpy.ok():
+            try:
+                depth, K, height, width, frame_id = self.icp_pose_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+
+            try:
+                with self.icp_lock:
+                    tsdf_layer = self.mapper.tsdf_layer_view()
+                    current_pose = self.icp_current_pose.clone()
+
+                cam_pose = torch.linalg.inv(current_pose).contiguous()
+                intrinsics = K.contiguous()
+
+                synth_depth = render_depth_image(
+                    tsdf_layer, cam_pose, intrinsics,
+                    height, width,
+                    self.max_integration_distance_m, 256
+                )
+
+                refined = self._point_to_plane_icp(depth, synth_depth, K, height, width)
+
+                if refined is not None:
+                    new_pose = refined @ current_pose
+                    self.icp_result_queue.put(new_pose)
+                else:
+                    self.icp_result_queue.put(None)
+
+            except Exception as e:
+                self.get_logger().error(f'ICP error: {str(e)}')
+                self.icp_result_queue.put(None)
+
+    def _point_to_plane_icp(self, depth_curr, depth_synth, K, H, W):
+        step = self.icp_sampling_step
+        v_coords = torch.arange(0, H, step, device='cuda')
+        u_coords = torch.arange(0, W, step, device='cuda')
+        v_grid, u_grid = torch.meshgrid(v_coords, u_coords, indexing='ij')
+
+        depth_curr_sampled = depth_curr[v_grid, u_grid]
+        depth_synth_sampled = depth_synth[v_grid, u_grid]
+
+        valid = (depth_curr_sampled > 0) & (depth_synth_sampled > 0) & \
+                (torch.abs(depth_curr_sampled - depth_synth_sampled) < self.icp_max_correspondence_dist)
+
+        if valid.sum() < 100:
+            return None
+
+        fx, fy = K[0, 0].item(), K[1, 1].item()
+        cx, cy = K[0, 2].item(), K[1, 2].item()
+
+        u_v = u_grid[valid].float()
+        v_v = v_grid[valid].float()
+        d_c = depth_curr_sampled[valid]
+        d_s = depth_synth_sampled[valid]
+
+        x_c = (u_v - cx) * d_c / fx
+        y_c = (v_v - cy) * d_c / fy
+        z_c = d_c
+        pts_curr = torch.stack([x_c, y_c, z_c], dim=1)
+
+        x_s = (u_v - cx) * d_s / fx
+        y_s = (v_v - cy) * d_s / fy
+        z_s = d_s
+        pts_synth = torch.stack([x_s, y_s, z_s], dim=1)
+
+        T = self._icp_solve_point_to_point(pts_curr, pts_synth)
+        return T
+
+    def _icp_solve_point_to_point(self, pts_curr, pts_synth, max_iter=None):
+        if max_iter is None:
+            max_iter = self.icp_max_iterations
+        T_est = torch.eye(4, device='cuda')
+        pts_curr_h = torch.cat([pts_curr, torch.ones(len(pts_curr), 1, device='cuda')], dim=1)
+        for _ in range(max_iter):
+            pts_transformed = (T_est @ pts_curr_h.T).T[:, :3]
+
+            c_curr = pts_transformed.mean(dim=0)
+            c_synth = pts_synth.mean(dim=0)
+
+            pts_c = pts_transformed - c_curr
+            pts_s = pts_synth - c_synth
+
+            H = pts_c.T @ pts_s
+            U, S, Vt = torch.linalg.svd(H)
+            R = Vt.T @ U.T
+            if torch.linalg.det(R) < 0:
+                Vt[-1, :] *= -1
+                R = Vt.T @ U.T
+            t = c_synth - R @ c_curr
+
+            delta = torch.eye(4, device='cuda')
+            delta[:3, :3] = R
+            delta[:3, 3] = t
+
+            T_est = delta @ T_est
+
+            angle = torch.acos(torch.clamp((torch.trace(R) - 1) / 2, -1, 1))
+            if angle.abs().item() < 1e-4 and torch.norm(t).item() < 1e-4:
+                break
+
+        return T_est
+
+    def sync_callback(self, h_depth: Image, h_rgb: Image, h_info: CameraInfo,
+                      e_depth: Image, e_rgb: Image, e_info: CameraInfo):
+        if self.icp_enabled:
+            # Exo first: ICP tracks frame-to-model against TSDF (drift-resistant)
+            self._integrate_frame(e_depth, e_rgb, e_info, 'exo_sensor', enable_icp=True)
+            # Head pose = exo ICP pose * exo_optical→head_optical (from TF tree)
+            head_pose = self._head_pose_from_icp(h_depth.header.frame_id)
+            if head_pose is not None:
+                self._integrate_frame(h_depth, h_rgb, h_info, 'head_sensor',
+                                    enable_icp=False, pose_override=head_pose)
+            else:
+                self._integrate_frame(h_depth, h_rgb, h_info, 'head_sensor', enable_icp=False)
+        else:
+            # Both use TF with same timestamp — no temporal gap to cause drift
+            self._integrate_frame(h_depth, h_rgb, h_info, 'head_sensor', enable_icp=False)
+            self._integrate_frame(e_depth, e_rgb, e_info, 'exo_sensor', enable_icp=False)
 
     def _update_and_publish(self):
         try:
@@ -339,6 +527,7 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
+        node.icp_running = False
         node.destroy_node()
         rclpy.shutdown()
 

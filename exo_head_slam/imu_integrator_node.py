@@ -171,13 +171,13 @@ class IMUIntegratorNode(Node):
 
         if camera == 'head':
             g_msg = make_vector(self.head_gravity[0], self.head_gravity[1], self.head_gravity[2])
-            g_msg.header.frame_id = 'head_camera_link'
+            g_msg.header.frame_id = 'head_color_optical_frame'
             self.head_gravity_pub.publish(g_msg)
 
             if len(gyro) > 0:
                 gyro_mean = np.mean(gyro, axis=0)
                 gyro_msg = make_vector(gyro_mean[0], gyro_mean[1], gyro_mean[2])
-                gyro_msg.header.frame_id = 'head_camera_link'
+                gyro_msg.header.frame_id = 'head_color_optical_frame'
                 self.head_gyro_pub.publish(gyro_msg)
 
             motion_msg = String()
@@ -185,17 +185,17 @@ class IMUIntegratorNode(Node):
             self.head_motion_pub.publish(motion_msg)
 
             bias_msg = make_vector(self.head_bias[0], self.head_bias[1], self.head_bias[2])
-            bias_msg.header.frame_id = 'head_camera_link'
+            bias_msg.header.frame_id = 'head_color_optical_frame'
             self.head_bias_pub.publish(bias_msg)
         else:
             g_msg = make_vector(self.exo_gravity[0], self.exo_gravity[1], self.exo_gravity[2])
-            g_msg.header.frame_id = 'exo_camera_link'
+            g_msg.header.frame_id = 'exo_color_optical_frame'
             self.exo_gravity_pub.publish(g_msg)
 
             if len(gyro) > 0:
                 gyro_mean = np.mean(gyro, axis=0)
                 gyro_msg = make_vector(gyro_mean[0], gyro_mean[1], gyro_mean[2])
-                gyro_msg.header.frame_id = 'exo_camera_link'
+                gyro_msg.header.frame_id = 'exo_color_optical_frame'
                 self.exo_gyro_pub.publish(gyro_msg)
 
             motion_msg = String()
@@ -203,7 +203,7 @@ class IMUIntegratorNode(Node):
             self.exo_motion_pub.publish(motion_msg)
 
             bias_msg = make_vector(self.exo_bias[0], self.exo_bias[1], self.exo_bias[2])
-            bias_msg.header.frame_id = 'exo_camera_link'
+            bias_msg.header.frame_id = 'exo_color_optical_frame'
             self.exo_bias_pub.publish(bias_msg)
 
 

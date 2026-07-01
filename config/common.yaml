@@ -40,3 +40,27 @@ imu_integrator:
     motion_accel_var_threshold: 0.5
     bias_estimation_samples: 100
     process_rate_hz: 10.0
+
+slam:
+  ros__parameters:
+    mode: "nvblox_tracking" # or dual_vo
+    icp_enabled: true
+    matcher_type: "lightglue"
+    lightglue_device: "cuda"
+    lightglue_max_keypoints: 2048
+    pose_graph_window: 20
+    min_matches_temporal: 10
+    min_matches_cross: 8
+    keyframe_trans_threshold: 0.05
+    keyframe_rot_threshold: 0.05
+    publish_tf: true
+    frame_id: "exo_link"
+    odom_frame_id: "odom"
+    map_frame_id: "map"
+    imu_gyro_assist.enabled: true
+    imu_gyro_topic: "/imu/exo/gyro_filtered"
+    icp_enabled: false
+    icp_track_every_n: 3
+    icp_max_iterations: 20
+    icp_max_correspondence_dist: 0.05
+    icp_sampling_step: 4

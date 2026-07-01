@@ -1,9 +1,7 @@
 from launch import LaunchDescription
 from launch.actions import IncludeLaunchDescription
-from launch.actions import LogInfo
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
-from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
 from launch.substitutions import PathJoinSubstitution, LaunchConfiguration
 from launch_ros.substitutions import FindPackageShare
 from launch.actions import DeclareLaunchArgument
@@ -117,21 +115,7 @@ def generate_launch_description():
         condition=IfCondition(publish_debug_pcl)
     )
 
-    # Static TFs to fix disjoint camera frames
-    static_tf_exo = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='static_tf_exo_link',
-        arguments=['--x', '0', '--y', '0', '--z', '0', '--yaw', '0', '--pitch', '0', '--roll', '0', '--frame-id', 'exo_link', '--child-frame-id', 'exo_camera_link']
-    )
-
-    static_tf_head = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='static_tf_head_link',
-        arguments=['--x', '0', '--y', '0', '--z', '0', '--yaw', '0', '--pitch', '0', '--roll', '0', '--frame-id', 'head_link', '--child-frame-id', 'head_camera_link']
-    )
-
+    # Static TFs linking exo_link/head_link to camera optical frames
     static_tf_exo_color = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
@@ -168,25 +152,14 @@ def generate_launch_description():
                    '--frame-id', 'head_color_frame', '--child-frame-id', 'head_color_optical_frame']
     )
 
-    # Identity default for map→odom; RTAB-Map dynamic corrections override once running
-    static_tf_map_odom = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='static_tf_map_odom',
-        arguments=['--x', '0', '--y', '0', '--z', '0', '--yaw', '0', '--pitch', '0', '--roll', '0', '--frame-id', 'map', '--child-frame-id', 'odom']
-    )
-
     actions = [
         use_sim_time_arg,
         publish_debug_pcl_arg,
         global_frame_arg,
-        static_tf_exo,
-        static_tf_head,
         static_tf_exo_color,
         static_tf_exo_optical,
         static_tf_head_color,
         static_tf_head_optical,
-        static_tf_map_odom,
         head_depth_preprocessor,
         exo_depth_preprocessor,
         head_masker,
@@ -197,18 +170,14 @@ def generate_launch_description():
         exo_pcl_pub,
     ]
 
-    try:
-        get_package_share_directory('rtabmap_slam')
-        actions.append(
-            IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(
-                    PathJoinSubstitution([pkg_share, 'launch', 'rtabmap_agents_launch.py'])
-                ),
-                launch_arguments={'use_sim_time': use_sim_time}.items(),
-            )
+    actions.append(
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                PathJoinSubstitution([pkg_share, 'launch', 'slam_launch.py'])
+            ),
+            launch_arguments={'use_sim_time': use_sim_time}.items(),
         )
-    except PackageNotFoundError:
-        actions.append(LogInfo(msg='rtabmap_slam not found, skipping RTAB-Map launch.'))
+    )
 
     actions.append(
         IncludeLaunchDescription(
