@@ -2,7 +2,7 @@
 
 This project implements a topic-driven multi-agent RGB-D pipeline for two synchronized camera streams: the head camera and the exo camera. The design assumes that RGB and depth images are already being published as ROS 2 topics by the upstream camera stack. 
 
-The package cleans the depth, removes dynamic objects, estimates the rigid transform between the two views, tracks the robot's pose in the world, and fuses both camera streams into a single, high-fidelity 3D map.
+The package cleans the depth, removes dynamic objects, estimates the rigid transform between the two views, tracks the robot's pose in the world, and combines depth maps for real-time visualization of 3D point clouds.
 
 ## High-Level Goal
 
@@ -10,8 +10,8 @@ The goal is to produce a **single fused 3D map** in a shared coordinate system.
 
 To achieve this, the pipeline separates the concerns of pose tracking and 3D reconstruction:
 * **RTAB-Map** runs on the **Exo camera** stream. It uses `rgbd_odometry` (via the python `fallback_vo` node) to track the robot's movement and the SLAM node to broadcast the `map -> odom -> exo_link` TF.
-* **The Extrinsic Solver** dynamically calculates and broadcasts the spatial link between the cameras (**`exo_link -> head_link`** TF).
-* **NVBlox** consumes the combined TF tree and the depth streams from both cameras to perform real-time volumetric TSDF fusion into a single global map.
+* **The Extrinsic Solver** dynamically calculates and broadcasts the spatial link between the cameras (**`exo_link -> head_link`** TF) and relative to the VGGT world frame (**`exo_link -> vggt_world`** TF).
+* **Volumetric Reconstruction**: The pipeline processes combined depths and unprojected point maps using deep learning to publish dense 3D point clouds directly to RViz. (Note: Isaac ROS NVBlox volumetric fusion is currently disabled to focus on direct point cloud display).
 
 ## Data Flow Overview
 
@@ -36,16 +36,22 @@ flowchart TD
     C2 --> D_SLAM[RTAB-Map SLAM Node]
     D_SLAM --> |Publishes TF: map -> odom| TF_TREE
     
-    C1 --> F[Extrinsic Solver]
+    C1 --> F[VGGT Extrinsic Solver]
     C2 --> F
     F --> |Publishes TF: exo -> head| TF_TREE
-
-    %% Fusion
-    C1 -. Masked Depth .-> N[Single NVBlox Node]
-    C2 -. Masked Depth .-> N
-    TF_TREE -. Poses .-> N
+    F --> |Publishes TF: exo -> vggt_world| TF_TREE
     
-    N --> J[Single Fused TSDF / Mesh Map]
+    %% Depth combination
+    F --> |Combined Depth| H_COMB[/head/combined/depth_raw/]
+    F --> |Combined Depth| E_COMB[/exo/combined/depth_raw/]
+    
+    %% Debug Point Clouds
+    H_COMB --> P1[Head Debug Pointcloud Publisher]
+    E_COMB --> P2[Exo Debug Pointcloud Publisher]
+    
+    P1 --> |/head/debug_pcl| RV[RViz Visualization]
+    P2 --> |/exo/debug_pcl| RV
+    F --> |/vggt/combined_pointcloud| RV
 ```
 
 ## 1. Depth Pre-Processing
@@ -66,7 +72,7 @@ Each depth preprocessor reads the input topic from YAML, sanitizes invalid value
 This stage removes dynamic objects from the RGB and depth images. People and moving machinery can corrupt geometric tracking and introduce "ghosting" in the final 3D map.
 
 ### Purpose
-* Maintain strict static scene geometry for RTAB-Map and NVBlox.
+* Maintain strict static scene geometry for RTAB-Map.
 * Prevent dynamic obstacles from becoming permanent fixtures in the 3D map.
 
 ### Current Behavior
@@ -83,47 +89,37 @@ The system uses a combination of Visual Odometry and SLAM on the **Exo camera** 
 
 ### Current Behavior
 * **`exo_rgbd_odometry`** (via `fallback_vo` node): Calculates motion between frames using the Exo camera's masked RGB-D stream. Publishes the `odom -> exo_link` transform.
-* **`exo_rtabmap`**: Performs SLAM, loop closure detection, and publishes the `map -> odom` transform. Dense mapping is disabled as NVBlox handles 3D reconstruction.
+* **`exo_rtabmap`**: Performs SLAM, loop closure detection, and publishes the `map -> odom` transform. Dense mapping is disabled as visualization is handled by point cloud publishers.
 
-## 4. 3D-to-3D Extrinsic Calibration
+## 4. Deep-Learning-Based Extrinsic Solver (VGGT)
 
-The extrinsic solver estimates the rigid transform between the exo camera and the head camera.
+The extrinsic solver estimates the rigid transform between the cameras and combines depth maps.
 
 ### Purpose
 * Align the two camera frames in SE(3).
 * Broadcast the resulting transform as a TF frame (**`exo_link -> head_link`**).
+* Scale predicted depths and point maps to align to the metric depth from the cameras.
+* Broadcast the VGGT world frame transform (**`exo_link -> vggt_world`**).
+* Publish a combined point cloud map of both cameras in the shared VGGT world frame.
 
 ### Current Behavior
-The solver extracts 2D feature correspondences between Exo and Head views using a configurable matcher (`orb` or `lightglue`), deprojects matched pixels into 3D points, and estimates the rigid transform. It broadcasts the transform from the Exo base link `exo_link` (parent) to the Head base link `head_link` (child).
-
-## 5. Volumetric Fusion (NVBlox)
-
-The final stage feeds the masked depth data into a **single** NVBlox node. NVBlox relies on the TF tree generated by RTAB-Map and the Extrinsic Solver to integrate depth observations into the correct global position.
-
-### Purpose
-* Aggregate depth observations from *both* cameras over time.
-* Produce a single, real-time TSDF-based mesh and 2D navigation costmap.
-
-### Current Behavior
-The unified NVBlox node subscribes to the masked depth topics of both cameras. 
-1. When an Exo depth frame arrives, NVBlox looks up the `map -> odom -> exo_link -> exo_camera_link` TF and integrates the voxels.
-2. When a Head depth frame arrives, NVBlox looks up the `map -> odom -> exo_link -> head_link -> head_camera_link` TF and integrates the voxels into the same map.
+The solver loads the pretrained **VGGT-1B** model. When synchronized image/depth pairs arrive, it runs the forward pass to predict extrinsics, intrinsics, and depth maps. It calculates a scale alignment factor relative to the metric depth from the cameras, and scales the translation and depths. It publishes combined depth maps (replacing missing raw depth with scaled VGGT depth) to `/head/combined/depth_raw` and `/exo/combined/depth_raw`. It also publishes `/vggt/combined_pointcloud` in the `vggt_world` frame.
 
 ## Configuration Layout
 
 The pipeline is configured through three YAML files:
 * `config/head.yaml`: Head camera topics and parameters.
 * `config/exo.yaml`: Exo camera topics and parameters.
-* `config/common.yaml`: Shared parameters (extrinsic solver matchers, TF frame names).
+* `config/common.yaml`: Shared parameters (extrinsic solver settings, TF frame names).
 
 ## Launch Structure
 
 The top-level entry point is `launch/main_pipeline_launch.py`. It starts:
 * Two depth preprocessing nodes.
 * Two semantic masking nodes.
-* One extrinsic solver node.
-* **Two** RTAB-Map nodes for the Exo camera (Odometry + SLAM).
-* **One** NVBlox node (Global fusion).
+* One extrinsic solver node (VGGT-based).
+* Two RTAB-Map nodes for the Exo camera (Odometry + SLAM).
+* Two pointcloud publisher nodes (for Head and Exo debug point clouds).
 
 ## Runtime Assumptions
 * RGB and depth images are published as ROS 2 topics.

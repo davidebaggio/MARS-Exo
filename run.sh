@@ -47,7 +47,11 @@ if [ -d "install/exo_head_slam/lib/exo_head_slam" ]; then
     sed -i "1s|^#!.*python.*|#!$(which python3)|" install/exo_head_slam/lib/exo_head_slam/*
 fi
 
-ros2 launch exo_head_slam main_pipeline_launch.py use_sim_time:=true publish_debug_pcl:=true global_frame:=odom &
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+METRICS_CSV="metrics_${TIMESTAMP}.csv"
+echo "Logging metrics to: $METRICS_CSV"
+
+ros2 launch exo_head_slam main_pipeline_launch.py use_sim_time:=true publish_debug_pcl:=true global_frame:=odom metrics_csv_path:="$METRICS_CSV" &
 PIPELINE_PID=$!
 
 wait_for_pipeline

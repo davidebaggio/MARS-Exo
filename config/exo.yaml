@@ -25,7 +25,7 @@ exo_semantic_masker:
 
 exo_nvblox:
   ros__parameters:
-    depth_topic: "/exo/masked/depth_raw"
+    depth_topic: "/exo/combined/depth_raw"
     rgb_topic: "/exo/masked/image_raw"
     camera_info_topic: "/camera/exo/color/camera_info"
 

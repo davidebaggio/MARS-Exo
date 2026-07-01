@@ -45,8 +45,8 @@ class PointCloudPublisherNode(Node):
 
         self.ts = message_filters.ApproximateTimeSynchronizer(
             [self.rgb_sub, self.depth_sub, self.info_sub],
-            queue_size=10,
-            slop=0.1
+            queue_size=200,
+            slop=0.2
         )
         self.ts.registerCallback(self.callback)
 

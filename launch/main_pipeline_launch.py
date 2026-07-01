@@ -24,7 +24,7 @@ def generate_launch_description():
 
     publish_debug_pcl_arg = DeclareLaunchArgument(
         'publish_debug_pcl',
-        default_value='false',
+        default_value='true',
         description='Publish per-image PointCloud2 in map frame for debugging'
     )
     publish_debug_pcl = LaunchConfiguration('publish_debug_pcl')
@@ -35,6 +35,13 @@ def generate_launch_description():
         description='Global frame for point clouds and rviz (e.g., map or odom)'
     )
     global_frame = LaunchConfiguration('global_frame')
+
+    metrics_csv_path_arg = DeclareLaunchArgument(
+        'metrics_csv_path',
+        default_value='extrinsic_metrics.csv',
+        description='Path to the metrics CSV file'
+    )
+    metrics_csv_path = LaunchConfiguration('metrics_csv_path')
 
     common_params = {'use_sim_time': use_sim_time}
 
@@ -73,7 +80,7 @@ def generate_launch_description():
         package='exo_head_slam',
         executable='extrinsic_solver',
         name='extrinsic_solver',
-        parameters=[common_config, exo_config, common_params],
+        parameters=[common_config, exo_config, common_params, {'metrics_csv_path': metrics_csv_path}],
     )
 
     # Debug PointCloud Publishers
@@ -83,7 +90,7 @@ def generate_launch_description():
         name='head_pcl_publisher',
         parameters=[{
             'input_rgb_topic': '/head/masked/image_raw',
-            'input_depth_topic': '/head/masked/depth_raw',
+            'input_depth_topic': '/head/combined/depth_raw',
             'input_camera_info_topic': '/camera/head/color/camera_info',
             'output_pcl_topic': '/head/debug_pcl',
             'global_frame': global_frame,
@@ -99,7 +106,7 @@ def generate_launch_description():
         name='exo_pcl_publisher',
         parameters=[{
             'input_rgb_topic': '/exo/masked/image_raw',
-            'input_depth_topic': '/exo/masked/depth_raw',
+            'input_depth_topic': '/exo/combined/depth_raw',
             'input_camera_info_topic': '/camera/exo/color/camera_info',
             'output_pcl_topic': '/exo/debug_pcl',
             'global_frame': global_frame,
@@ -128,6 +135,7 @@ def generate_launch_description():
         use_sim_time_arg,
         publish_debug_pcl_arg,
         global_frame_arg,
+        metrics_csv_path_arg,
         static_tf_exo,
         static_tf_head,
         head_depth_preprocessor,
@@ -152,16 +160,6 @@ def generate_launch_description():
     except PackageNotFoundError:
         actions.append(LogInfo(msg='rtabmap_slam not found, skipping RTAB-Map launch.'))
 
-    actions.append(
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(
-                PathJoinSubstitution([pkg_share, 'launch', 'nvblox_fusion_launch.py'])
-            ),
-            launch_arguments={
-                'use_sim_time': use_sim_time,
-                'global_frame': global_frame
-            }.items(),
-        )
-    )
+
 
     return LaunchDescription(actions)
