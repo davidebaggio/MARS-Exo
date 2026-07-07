@@ -1,84 +1,84 @@
 # GEMINI.md - exo_head_slam
 
 ## Project Overview
-`exo_head_slam` is a multi-agent RGB-D SLAM and volumetric fusion pipeline designed for wearable exoskeleton systems equipped with head-mounted cameras. It synchronizes two distinct RGB-D streams to produce a single, high-fidelity 3D map in a shared coordinate system.
+`exo_head_slam` is a multi-agent RGB-D SLAM pipeline for a wearable exoskeleton system equipped with a head-mounted camera. It synchronizes two distinct RGB-D streams and uses a deep geometric transformer (VGGT-1B) to estimate extrinsics and fill depth gaps, while RTAB-Map handles visual SLAM on the exoskeleton camera.
 
-The system decouples **pose tracking** (handled by RTAB-Map) from **volumetric reconstruction** (handled by NVIDIA Isaac ROS NVBlox), using a custom **Extrinsic Solver** to dynamically link the coordinate frames of the two cameras.
+The system decouples **map building / loop closure** (handled by RTAB-Map running internally on the exo camera) from **inter-camera calibration** (handled by the VGGT-based Extrinsic Solver).
 
 ## Core Architecture
 
 ### 1. Depth Preprocessing (`depth_preprocessor_node.py`)
-- **Action:** Sanitizes raw depth topics.
-- **Features:** Removes invalid values (NaN/Inf), applies spatial smoothing, and temporal blending to stabilize frames for downstream tracking and fusion.
+- Sanitizes raw depth topics: removes invalid values (NaN/Inf), applies spatial bilateral smoothing, and EMA temporal blending to stabilize frames.
 
 ### 2. Semantic Masking (`semantic_masker_node.py`)
-- **Action:** Filters dynamic objects from RGB and Depth streams.
-- **Technology:** Uses `ultralytics` (YOLOv8) to identify humans and moving machinery, zeroing out corresponding pixels to prevent "ghosting" in the 3D map.
+- Filters dynamic objects from RGB and Depth streams using `ultralytics` (YOLOv8-seg). Pixels classified as dynamic are zeroed out to prevent "ghosting" in the map.
 
-### 3. Pose Tracking (`rtabmap_agents_launch.py`)
-- **Action:** Localization of the primary agent.
-- **Logic:** RTAB-Map runs on the **exo camera** stream to publish the `map -> odom -> exo_link` transform (using visual odometry via `fallback_vo` and SLAM via `rtabmap`). Dense mapping is disabled within RTAB-Map to conserve resources.
+### 3. Pose Tracking & SLAM (`rtabmap_agents_launch.py`)
+- A single `rtabmap_slam` instance runs on the **exo camera** stream.
+- `subscribe_odom_info` is **disabled** — rtabmap_slam computes its own visual odometry internally and publishes the full `map -> odom -> exo_link` TF chain when `publish_tf := true` and `odom_frame_id` is set.
+- Occupancy grid (`/map`) and `/exo_rtabmap/cloud_map` are published when `RGBD/CreateOccupancyGrid`/`Grid/FromDepth` are `true`.
 
 ### 4. Extrinsic Solver (`extrinsic_solver_node.py`)
-- **Action:** Estimates the spatial relationship between cameras.
-- **Logic:** Matches features between head and exo views using **LightGlue** (GPU) or **ORB** (CPU). Deprojects matches to 3D and solves for the rigid transform via RANSAC and SVD.
-- **Output:** Broadcasts the `exo_link -> head_link` TF (configured via `exo_frame_id` and `head_frame_id`).
+- Estimates the spatial relationship between the head and exoskeleton cameras using **VGGT-1B** (`facebook/VGGT-1B`).
+- Forwards a sliding window of masked head+exo image pairs through the VGGT aggregator, camera head, and depth head. Predicted depths are scale-aligned to metric depth via per-frame median ratio and merged with raw depth to fill holes.
+- **VGGT depth-head confidence** (`depth_conf`, returned alongside `depth_map`, range `(1, +inf)`) gates:
+  - the `np.where` raw+VGGT depth combine — raw-depth holes are filled with VGGT depth only where `depth_conf` is high (percentile or absolute threshold),
+  - the published `/vggt/combined_pointcloud` — low-confidence points are dropped.
+- Broadcasts `exo_link -> head_link` and `exo_link -> vggt_world` TFs after distance / Z-height / jump / EMA safety checks.
+- Optional metrics CSV: scale, depth RMSE/MAE on confident pixels, conf percentiles (p50/p95), GT error (when `gt_parent_frame`/`gt_child_frame` set).
 
-### 5. Volumetric Fusion (`nvblox_fusion_launch.py`)
-- **Action:** Global 3D mapping.
-- **Logic:** A single NVBlox node integrates masked depth from both cameras using the unified TF tree to generate a global TSDF-based mesh and 2D costmap.
+### 5. Debug PointCloud Publishers (`pointcloud_publisher_node.py`)
+- Optional per-camera XYZRGB PointCloud2 in the local camera frame, gated by the `publish_debug_pcl` launch arg.
 
 ## Technical Stack
-- **Robotics:** ROS 2 (Humble/Iron/Jazzy), `rclpy`, `tf2_ros`.
+- **Robotics:** ROS 2 (Jazzy), `rclpy`, `tf2_ros`.
 - **Vision:** OpenCV, `cv_bridge`, `ultralytics`.
-- **Calibration:** `message_filters` (Approximate Time Sync), 3D-to-3D rigid transform estimation.
-- **Accelerated Computing:** NVIDIA Isaac ROS NVBlox, PyTorch (LightGlue).
+- **Calibration:** `message_filters` (Approximate Time Sync), VGGT-1B transformer, scipy SE(3) math.
+- **Accelerated Computing:** PyTorch (CUDA, bfloat16 on Ampere+).
 
 ## Building and Installation
 
 ### Dependencies
-Ensure the following are installed in your ROS 2 workspace:
-- `rtabmap_ros`
-- `isaac_ros_nvblox`
-- Python packages: `ultralytics`, `opencv-python`, `torch` (for LightGlue).
+- `rtabmap_ros` (optional: when absent, the launch file silently skips RTAB-Map and you lose `map -> odom` TF).
+- Python packages: `ultralytics>=8.0`, `scipy`, `torch`, `huggingface_hub`, `cv_bridge`.
 
 ### Build Process
 ```bash
 colcon build --packages-select exo_head_slam --symlink-install
 source install/setup.bash
 ```
+(`make build` does both, plus the shebang fix described in `AGENTS.md`.)
 
 ### Model Files
-The semantic masker requires a YOLOv8 segmentation model. By default, it expects `yolov8n-seg.pt` in the repository root. Ensure this file is present before launching the pipeline.
+- `yolov8n-seg.pt` — place in repository root (gitignored). Semantic masker falls back to an empty mask if missing.
+- `facebook/VGGT-1B` — downloaded automatically by `huggingface_hub` on first run.
 
 ## Running the Pipeline
 
 ### Automated Launch (Bag Playback)
-The project includes a `run.sh` script that automates building, sourcing, and launching with a specific ROS 2 bag:
 ```bash
 ./run.sh /path/to/data.mcap
 ```
+Builds, sources, launches `main_pipeline_launch.py` with `use_sim_time:=true`, plays the bag at 0.3x, opens RViz. Default bag: `data/rosbag2_2026_06_11-15_34_13/rosbag2_2026_06_11-15_34_13_0.mcap`.
 
 ### Manual Pipeline Launch
-To start the pipeline without bag playback (e.g., for live sensor data):
 ```bash
 ros2 launch exo_head_slam main_pipeline_launch.py
 ```
 
-### Debugging & Visualization
-To visualize the raw alignment of cameras in the `map` frame before volumetric fusion, you can enable the PointCloud publishers:
+### Debug Visualization
 ```bash
 ros2 launch exo_head_slam main_pipeline_launch.py publish_debug_pcl:=true
 ```
-This will publish colored PointCloud2 messages to `/head/debug_pcl` and `/exo/debug_pcl`, transformed into the global `map` frame.
+Publishes `/head/debug_pcl` and `/exo/debug_pcl` (PointCloud2 in local camera frames) plus the VGGT `vggt_world`-frame `/vggt/combined_pointcloud`.
 
 ## Configuration
-System behavior is defined across three YAML files in the `config/` directory:
-- **`head.yaml`:** Topics and parameters specific to the head-mounted camera.
-- **`exo.yaml`:** Topics and parameters specific to the exoskeleton-mounted camera.
-- **`common.yaml`:** Shared settings including matcher selection (`orb` vs `lightglue`) and TF frame names.
+- **`head.yaml`** — depth_preprocessor and semantic_masker for the head camera.
+- **`exo.yaml`** — depth_preprocessor, semantic_masker, and the full `exo_rtabmap` parameter block (internal visual odom, occupancy grid, feature params).
+- **`common.yaml`** — `extrinsic_solver` parameters: frame ids, sliding window, TF EMA, **VGGT confidence gating** (`depth_conf_mode`, `depth_conf_percentile`, `depth_conf_absolute`, `conf_gate_combine`, `conf_filter_pointcloud`), and metrics settings.
 
 ## Development Conventions
-- **Nodes:** All ROS 2 nodes are implemented in Python within `exo_head_slam/`.
-- **Utilities:** Math and vision helper functions are centralized in `exo_head_slam/utils/`.
-- **TFs:** The system expects a standard `map -> odom -> exo_link` chain provided by the tracking backend, with static TFs defining `exo_link -> exo_camera_link` and `head_link -> head_camera_link`, and the extrinsic solver publishing `exo_link -> head_link`.
+- **Nodes:** All ROS 2 nodes are Python classes in `exo_head_slam/`.
+- **Utilities:** `exo_head_slam/utils/vision_utils.py` holds the `apply_semantic_mask` helper used by `semantic_masker_node`.
+- **TFs:** `map -> odom -> exo_link` comes from `rtabmap_slam`; static TFs publish `exo_link -> exo_camera_link` and `head_link -> head_camera_link`; the extrinsic solver publishes `exo_link -> head_link` and `exo_link -> vggt_world`.
+- **No fallback VO:** The plan deliberately removed the previous Python `fallback_vo` node and `rtabmapvisual_odometry` dependency — RTAB-Map's internal visual odometry is the only odometry source.

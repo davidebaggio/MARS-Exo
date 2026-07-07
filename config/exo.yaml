@@ -2,7 +2,6 @@ exo_depth_preprocessor:
   ros__parameters:
     input_depth_topic: "/camera/exo/aligned_depth_to_color/image_raw"
     output_depth_topic: "/exo/filtered/depth_raw"
-    expected_frame_id: "exo"
     depth_filter.enabled: true
     depth_filter.depth_unit_scale: 0.001
     depth_filter.spatial.kernel_size: 5
@@ -15,7 +14,6 @@ exo_semantic_masker:
   ros__parameters:
     input_rgb_topic: "/camera/exo/color/image_raw"
     input_depth_topic: "/exo/filtered/depth_raw"
-    expected_frame_id: "exo"
     output_rgb_topic: "/exo/masked/image_raw"
     output_depth_topic: "/exo/masked/depth_raw"
     masker.model_path: "yolov8n-seg.pt"
@@ -23,24 +21,13 @@ exo_semantic_masker:
     masker.dynamic_classes: [0, 1, 2, 3, 5, 7]
     sync_slop: 0.035
 
-exo_nvblox:
-  ros__parameters:
-    depth_topic: "/exo/combined/depth_raw"
-    rgb_topic: "/exo/masked/image_raw"
-    camera_info_topic: "/camera/exo/color/camera_info"
-
-extrinsic_solver:
-  ros__parameters:
-    exo_height_m: 0.95
-
 exo_rtabmap:
   ros__parameters:
     subscribe_depth: true
     frame_id: "exo_link"
     map_frame_id: "map"
     odom_frame_id: "odom"
-    publish_tf: true
-    subscribe_odom_info: true
+    publish_tf: true            # publishes map->odom and odom->exo_link (internal visual odom)
     approx_sync: true
     approx_sync_max_interval: 0.02
     queue_size: 100
@@ -53,7 +40,7 @@ exo_rtabmap:
     Grid/FromDepth: "true"
     Grid/MaxGroundHeight: "0.1"
     Grid/MaxObstacleHeight: "2.0"
-    Odom/Strategy: "0" # Frame-to-Map
+    Odom/Strategy: "0" # Frame-to-Map internal visual odom
     Vis/EstimationType: "0" # 3D->2D (PnP)
     Vis/MinInliers: "6"
     Vis/InlierDistance: "0.1"
@@ -65,14 +52,3 @@ exo_rtabmap:
     RGBD/LinearUpdate: "0.01"
     RGBD/AngularUpdate: "0.01"
     RGBD/OptimizeMaxError: "0.1"
-
-exo_rgbd_odometry:
-  ros__parameters:
-    publish_tf: true
-    frame_id: "exo_link"
-    odom_frame_id: "odom"
-    approx_sync: true
-    approx_sync_max_interval: 0.02
-    matcher_type: "lightglue"
-    lightglue_device: "cuda"
-    lightglue_max_keypoints: 2048

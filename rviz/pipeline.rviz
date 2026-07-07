@@ -133,28 +133,6 @@ Visualization Manager:
       Update Interval: 1
       Use Timestamp: false
       Value: true
-    - Class: rviz_default_plugins/PointCloud2
-      Color Transformer: RGB8
-      Enabled: false
-      Name: NvbloxCloud
-      Size (Pixels): 3
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /nvblox/pointcloud
-      Value: true
-    - Class: rviz_default_plugins/Marker
-      Enabled: false
-      Name: NvbloxMesh
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /nvblox/mesh
-      Value: true
   Global Options:
     Background Color: 48; 48; 48
     Fixed Frame: map

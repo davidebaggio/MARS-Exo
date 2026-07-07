@@ -4,25 +4,22 @@ from sensor_msgs.msg import Image, CameraInfo, PointCloud2, PointField
 from cv_bridge import CvBridge
 import numpy as np
 import message_filters
-# ponytail: Removed tf2_ros and scipy.spatial.transform dependencies
 
 
 class PointCloudPublisherNode(Node):
     def __init__(self):
         super().__init__('pointcloud_publisher_node')
-        
+
         self.declare_parameter('input_rgb_topic', 'UNDEFINED')
         self.declare_parameter('input_depth_topic', 'UNDEFINED')
         self.declare_parameter('input_camera_info_topic', 'UNDEFINED')
         self.declare_parameter('output_pcl_topic', 'pcl_output')
-        self.declare_parameter('global_frame', 'map')
-        self.declare_parameter('downsample_factor', 2) 
-        
+        self.declare_parameter('downsample_factor', 2)
+
         self.input_rgb_topic = self.get_parameter('input_rgb_topic').value
         self.input_depth_topic = self.get_parameter('input_depth_topic').value
         self.input_camera_info_topic = self.get_parameter('input_camera_info_topic').value
         self.output_pcl_topic = self.get_parameter('output_pcl_topic').value
-        self.global_frame = self.get_parameter('global_frame').value
         self.downsample_factor = self.get_parameter('downsample_factor').value
 
         if 'UNDEFINED' in [self.input_rgb_topic, self.input_depth_topic, self.input_camera_info_topic]:
@@ -30,14 +27,12 @@ class PointCloudPublisherNode(Node):
             return
 
         self.bridge = CvBridge()
-        # ponytail: Removed tf buffer/listener to prevent Python TF lookup failures
-
 
         # Sync subscribers
         self.rgb_sub = message_filters.Subscriber(self, Image, self.input_rgb_topic)
         self.depth_sub = message_filters.Subscriber(self, Image, self.input_depth_topic)
         self.info_sub = message_filters.Subscriber(self, CameraInfo, self.input_camera_info_topic)
-        
+
         # Track raw message arrivals
         self.rgb_sub.registerCallback(lambda _: self._count_msg('rgb'))
         self.depth_sub.registerCallback(lambda _: self._count_msg('depth'))
@@ -51,7 +46,7 @@ class PointCloudPublisherNode(Node):
         self.ts.registerCallback(self.callback)
 
         self.pcl_pub = self.create_publisher(PointCloud2, self.output_pcl_topic, 10)
-        
+
         self._msg_counts = {'rgb': 0, 'depth': 0, 'info': 0, 'sync': 0}
         self.create_timer(5.0, self.log_stats)
 
@@ -86,7 +81,7 @@ class PointCloudPublisherNode(Node):
             # 3. Project to 3D
             h, w = depth_img.shape
             u, v = np.meshgrid(np.arange(w), np.arange(h))
-            
+
             valid = (depth_img > 0.1) & (depth_img < 10.0)
             z = depth_img[valid]
             u = u[valid]
@@ -104,11 +99,7 @@ class PointCloudPublisherNode(Node):
 
             x = (u - cx) * z / fx
             y = (v - cy) * z / fy
-            points_cam = np.vstack((x, y, z)).T 
-
-            # ponytail: Use points directly in the local camera frame without Python TF lookups
-            points_local = points_cam
-
+            points_local = np.vstack((x, y, z)).T
 
             # 6. Create PointCloud2 (Packed XYZRGB)
             num_points = len(points_local)
@@ -121,7 +112,7 @@ class PointCloudPublisherNode(Node):
             data['x'] = points_local[:, 0]
             data['y'] = points_local[:, 1]
             data['z'] = points_local[:, 2]
-            
+
             # Pack RGB into uint32 (0x00RRGGBB)
             rgb_packed = (rgb[:, 0].astype(np.uint32) << 16) | \
                          (rgb[:, 1].astype(np.uint32) << 8) | \

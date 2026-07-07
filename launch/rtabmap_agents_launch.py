@@ -14,10 +14,12 @@ def load_section(config_path: str, section: str) -> dict:
         data = yaml.safe_load(stream) or {}
     return (data.get(section, {}) or {}).get('ros__parameters', {})
 
+
 def generate_launch_description():
     """
-    Launches dual RTAB-Map odometry and an EKF to fuse them.
-    A single RTAB-Map instance runs on the exo camera for SLAM.
+    Launches a single RTAB-Map SLAM instance on the exo camera.
+    rtabmap_slam computes its own visual odometry internally (no external odom node).
+    Publishes map->odom and odom->exo_link TFs.
     """
     use_sim_time_arg = DeclareLaunchArgument(
         'use_sim_time',
@@ -28,12 +30,11 @@ def generate_launch_description():
 
     pkg_share = get_package_share_directory('exo_head_slam')
     config_dir = os.path.join(pkg_share, 'config')
-    
+
     exo_config_path = os.path.join(config_dir, 'exo.yaml')
-    
+
     exo_params = load_section(exo_config_path, 'exo_rtabmap')
-    exo_odom_params = load_section(exo_config_path, 'exo_rgbd_odometry')
-    
+
     # Base parameters for all nodes
     base_params = {
         'use_sim_time': use_sim_time,
@@ -42,22 +43,7 @@ def generate_launch_description():
         'qos_camera_info': 2,
     }
 
-    # Exo Fallback Visual Odometry Node (Python)
-    exo_odometry = Node(
-        package='exo_head_slam',
-        executable='fallback_vo',
-        name='exo_rgbd_odometry',
-        parameters=[{**base_params, **exo_params, **exo_odom_params}],
-        remappings=[
-            ('rgb/image', exo_params['rgb_topic']),
-            ('depth/image', exo_params['depth_topic']),
-            ('rgb/camera_info', exo_params['camera_info_topic']),
-            ('odom', '/exo/odom'),
-        ],
-        output='screen'
-    )
-
-    # SLAM Node (Exo)
+    # SLAM Node (Exo) with internal visual odometry
     exo_rtabmap = Node(
         package='rtabmap_slam',
         executable='rtabmap',
@@ -67,7 +53,6 @@ def generate_launch_description():
             ('rgb/image', exo_params['rgb_topic']),
             ('depth/image', exo_params['depth_topic']),
             ('rgb/camera_info', exo_params['camera_info_topic']),
-            ('odom', '/exo/odom'),
         ],
         arguments=['-d'],
         output='screen'
@@ -75,7 +60,5 @@ def generate_launch_description():
 
     return LaunchDescription([
         use_sim_time_arg,
-        exo_odometry,
         exo_rtabmap,
     ])
-

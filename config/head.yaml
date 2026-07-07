@@ -2,7 +2,6 @@ head_depth_preprocessor:
   ros__parameters:
     input_depth_topic: "/camera/head/aligned_depth_to_color/image_raw"
     output_depth_topic: "/head/filtered/depth_raw"
-    expected_frame_id: "head"
     depth_filter.enabled: true
     depth_filter.depth_unit_scale: 0.001
     depth_filter.spatial.kernel_size: 5
@@ -15,37 +14,9 @@ head_semantic_masker:
   ros__parameters:
     input_rgb_topic: "/camera/head/color/image_raw"
     input_depth_topic: "/head/filtered/depth_raw"
-    expected_frame_id: "head"
     output_rgb_topic: "/head/masked/image_raw"
     output_depth_topic: "/head/masked/depth_raw"
     masker.model_path: "yolov8n-seg.pt"
     masker.conf_threshold: 0.25
     masker.dynamic_classes: [0, 1, 2, 3, 5, 7]
     sync_slop: 0.035
-
-head_rtabmap:
-  ros__parameters:
-    subscribe_depth: true
-    frame_id: "head_link"
-    approx_sync: true
-    approx_sync_max_interval: 0.02
-    wait_for_transform: 0.2
-    rgb_topic: "/head/masked/image_raw"
-    depth_topic: "/head/masked/depth_raw"
-    camera_info_topic: "/camera/head/color/camera_info"
-    RGBD/CreateOccupancyGrid: false
-    Grid/FromDepth: false
-
-
-head_nvblox:
-  ros__parameters:
-    global_frame: "map"
-    voxel_size_m: 0.05
-    max_integration_distance_m: 5.0
-    mesh_update_period: 10
-    costmap_resolution: 0.1
-    costmap_height_min: 0.0
-    costmap_height_max: 1.0
-    depth_topic: "/head/combined/depth_raw"
-    rgb_topic: "/head/masked/image_raw"
-    camera_info_topic: "/camera/head/color/camera_info"
