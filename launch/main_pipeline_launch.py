@@ -29,13 +29,6 @@ def generate_launch_description():
     )
     publish_debug_pcl = LaunchConfiguration('publish_debug_pcl')
 
-    global_frame_arg = DeclareLaunchArgument(
-        'global_frame',
-        default_value='map',
-        description='Global frame for point clouds and rviz (e.g., map or odom)'
-    )
-    global_frame = LaunchConfiguration('global_frame')
-
     metrics_csv_path_arg = DeclareLaunchArgument(
         'metrics_csv_path',
         default_value='extrinsic_metrics.csv',
@@ -93,7 +86,6 @@ def generate_launch_description():
             'input_depth_topic': '/head/combined/depth_raw',
             'input_camera_info_topic': '/camera/head/color/camera_info',
             'output_pcl_topic': '/head/debug_pcl',
-            'global_frame': global_frame,
             'downsample_factor': 2,
             'use_sim_time': use_sim_time
         }],
@@ -109,42 +101,18 @@ def generate_launch_description():
             'input_depth_topic': '/exo/combined/depth_raw',
             'input_camera_info_topic': '/camera/exo/color/camera_info',
             'output_pcl_topic': '/exo/debug_pcl',
-            'global_frame': global_frame,
             'downsample_factor': 2,
             'use_sim_time': use_sim_time
         }],
         condition=IfCondition(publish_debug_pcl)
     )
 
-    # Static TFs to fix disjoint camera frames
-    static_tf_exo = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='static_tf_exo_link',
-        arguments=['0', '0', '0', '0', '0', '0', 'exo_link', 'exo_camera_link']
-    )
-
-    static_tf_head = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='static_tf_head_link',
-        arguments=['0', '0', '0', '0', '0', '0', 'head_link', 'head_camera_link']
-    )
-
+    # Start RTAB-Map early so it initializes before data flows (service ready
+    # by the time map_assembler fires after its 5s TimerAction delay).
     actions = [
         use_sim_time_arg,
         publish_debug_pcl_arg,
-        global_frame_arg,
         metrics_csv_path_arg,
-        static_tf_exo,
-        static_tf_head,
-        head_depth_preprocessor,
-        exo_depth_preprocessor,
-        head_masker,
-        exo_masker,
-        extrinsic_solver,
-        head_pcl_pub,
-        exo_pcl_pub,
     ]
 
     try:
@@ -160,6 +128,14 @@ def generate_launch_description():
     except PackageNotFoundError:
         actions.append(LogInfo(msg='rtabmap_slam not found, skipping RTAB-Map launch.'))
 
-
+    actions.extend([
+        head_depth_preprocessor,
+        exo_depth_preprocessor,
+        head_masker,
+        exo_masker,
+        extrinsic_solver,
+        head_pcl_pub,
+        exo_pcl_pub,
+    ])
 
     return LaunchDescription(actions)

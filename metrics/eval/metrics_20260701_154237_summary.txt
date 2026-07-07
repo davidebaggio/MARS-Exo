@@ -1,0 +1,38 @@
+=========================================
+EXTRINSIC CALIBRATION EVALUATION SUMMARY
+=========================================
+Metrics CSV File: metrics/pipeline/metrics_20260701_154237.csv
+Total Frames Processed: 192
+
+-----------------------------------------
+SOLVER STATUS BREAKDOWN
+-----------------------------------------
+SUCCESS             :  173 ( 90.10%)
+OUT_OF_BOUNDS       :   17 (  8.85%)
+TRANSLATION_JUMP    :    1 (  0.52%)
+SOLVER_ERROR        :    1 (  0.52%)
+
+-----------------------------------------
+ESTIMATED EXTRINSICS STATS (SUCCESS ONLY)
+-----------------------------------------
+t_x (Left/Right):
+  Mean:      -0.2644 m
+  Variance: 0.005783 m^2 (StdDev: 0.0760 m)
+  Min/Max:   -0.3976 /  -0.0866 m
+t_y (Up/Down):
+  Mean:       0.0265 m
+  Variance: 0.001775 m^2 (StdDev: 0.0421 m)
+  Min/Max:   -0.0919 /   0.1399 m
+t_z (Forward/Backward):
+  Mean:       0.5154 m
+  Variance: 0.006429 m^2 (StdDev: 0.0802 m)
+  Min/Max:    0.1633 /   0.6193 m
+
+-----------------------------------------
+VGGT DEPTH SCALE ALIGNMENT
+-----------------------------------------
+Scale Factor:
+  Mean:       2.1151
+  Median:     1.9731
+  Variance: 0.157196
+  Min/Max:    1.4375 /   3.2141

@@ -52,6 +52,10 @@ mkdir -p metrics/pipeline
 METRICS_CSV="metrics/pipeline/metrics_${TIMESTAMP}.csv"
 echo "Logging metrics to: $METRICS_CSV"
 
+# Preload fastcdr compat shim to provide missing serialize(unsigned int) symbol
+# that rtabmap_msgs needs but fastcdr 2.2.5 lacks (needs 2.2.7+).
+export LD_PRELOAD="$(realpath lib/libfastcdr_compat.so)${LD_PRELOAD:+:$LD_PRELOAD}"
+
 ros2 launch exo_head_slam main_pipeline_launch.py use_sim_time:=true publish_debug_pcl:=true global_frame:=odom metrics_csv_path:="$METRICS_CSV" &
 PIPELINE_PID=$!
 

@@ -1,0 +1,52 @@
+=========================================
+EXTRINSIC CALIBRATION EVALUATION SUMMARY
+=========================================
+Metrics CSV File: metrics/pipeline/metrics_20260701_160037.csv
+Total Frames Processed: 193
+
+-----------------------------------------
+SOLVER STATUS BREAKDOWN
+-----------------------------------------
+SUCCESS             :  172 ( 89.12%)
+OUT_OF_BOUNDS       :   19 (  9.84%)
+TRANSLATION_JUMP    :    1 (  0.52%)
+SOLVER_ERROR        :    1 (  0.52%)
+
+-----------------------------------------
+ESTIMATED EXTRINSICS STATS (SUCCESS ONLY)
+-----------------------------------------
+t_x (Left/Right):
+  Mean:      -0.2655 m
+  Variance: 0.005793 m^2 (StdDev: 0.0761 m)
+  Min/Max:   -0.3839 /  -0.0906 m
+t_y (Up/Down):
+  Mean:       0.0228 m
+  Variance: 0.001541 m^2 (StdDev: 0.0393 m)
+  Min/Max:   -0.1054 /   0.1399 m
+t_z (Forward/Backward):
+  Mean:       0.5175 m
+  Variance: 0.004892 m^2 (StdDev: 0.0699 m)
+  Min/Max:    0.2651 /   0.6179 m
+
+-----------------------------------------
+VGGT DEPTH SCALE ALIGNMENT
+-----------------------------------------
+Scale Factor:
+  Mean:       2.1135
+  Median:     1.9813
+  Variance: 0.162204
+  Min/Max:    1.4203 /   3.2327
+
+-----------------------------------------
+VGGT VS GT DEPTH ESTIMATION ERROR
+-----------------------------------------
+Head Camera:
+  RMSE Mean:       0.0766 m
+  RMSE Variance: 0.002984 m^2
+  MAE Mean:        0.0579 m
+  MAE Variance:  0.001181 m^2
+Exo Camera:
+  RMSE Mean:       0.0675 m
+  RMSE Variance: 0.000975 m^2
+  MAE Mean:        0.0514 m
+  MAE Variance:  0.000687 m^2

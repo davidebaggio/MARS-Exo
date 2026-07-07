@@ -72,7 +72,7 @@ Visualization Manager:
       Value: true
     - Class: rviz_default_plugins/PointCloud2
       Color Transformer: RGB8
-      Enabled: true
+      Enabled: false
       Name: HeadDebugCloud
       Size (Pixels): 3
       Topic:
@@ -81,10 +81,10 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /head/debug_pcl
-      Value: true
+      Value: false
     - Class: rviz_default_plugins/PointCloud2
       Color Transformer: RGB8
-      Enabled: true
+      Enabled: false
       Name: ExoDebugCloud
       Size (Pixels): 3
       Topic:
@@ -93,7 +93,7 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /exo/debug_pcl
-      Value: true
+      Value: false
     - Class: rviz_default_plugins/PointCloud2
       Color Transformer: RGB8
       Enabled: true
@@ -110,10 +110,10 @@ Visualization Manager:
       Color Transformer: RGB8
       Enabled: true
       Name: RtabmapCloud
-      Size (Pixels): 2
+      Size (Pixels): 3
       Topic:
         Depth: 5
-        Durability Policy: Volatile
+        Durability Policy: Transient Local
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /exo_rtabmap/cloud_map

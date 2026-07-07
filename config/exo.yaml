@@ -29,10 +29,10 @@ exo_rtabmap:
     odom_frame_id: "odom"
     publish_tf: true            # publishes map->odom and odom->exo_link (internal visual odom)
     approx_sync: true
-    approx_sync_max_interval: 0.02
+    approx_sync_max_interval: 0.2
     queue_size: 100
     sync_queue_size: 100
-    wait_for_transform: 0.2
+    wait_for_transform: 0.0
     rgb_topic: "/exo/masked/image_raw"
     depth_topic: "/exo/masked/depth_raw"
     camera_info_topic: "/camera/exo/color/camera_info"
@@ -48,7 +48,7 @@ exo_rtabmap:
     Vis/FeatureType: "8" # GFTT/ORB
     Vis/MaxFeatures: "1000"
     # Smoothing & Convergence parameters
-    Rtabmap/DetectionRate: "0"
+    Rtabmap/DetectionRate: "1"
     RGBD/LinearUpdate: "0.01"
     RGBD/AngularUpdate: "0.01"
     RGBD/OptimizeMaxError: "0.1"

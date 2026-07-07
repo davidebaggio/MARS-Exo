@@ -1,43 +1,36 @@
-# ROS 2 / colcon
-build/
-install/
-log/
 
-# Python
-__pycache__/
-*.py[cod]
-*.so
-*.egg-info/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
+build/
 .coverage
 coverage.xml
+*.csv
+data
+.DS_Store
+# Editor / OS
+*.egg-info/
+*.engine
+env/
 htmlcov/
-
-# Virtual environments
+.idea/
+install/
+.ipynb_checkpoints/
+# Jupyter
+lib/*.so
+log/
+metrics/**/*.txtlib/*.so
+# Models
+.mypy_cache/
+*.png
+*.pt
+__pycache__/
+*.py[cod]
+.pytest_cache/
+# Python
+# ROS 2 / colcon
+.ruff_cache/
+*.so
+*.swo
+*.swp
 .venv/
 venv/
-env/
-
-# Editor / OS
+# Virtual environments
 .vscode/
-.idea/
-.DS_Store
-*.swp
-*.swo
-
-# Jupyter
-.ipynb_checkpoints/
-
-# Models
-*.pt
-*.engine
-
-data
-
-*.png
-
-*.csv
-
-metrics/**/*.txt

@@ -6,7 +6,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch_ros.actions import Node
 from launch.substitutions import LaunchConfiguration
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, TimerAction
 
 
 def load_section(config_path: str, section: str) -> dict:
@@ -35,6 +35,12 @@ def generate_launch_description():
 
     exo_params = load_section(exo_config_path, 'exo_rtabmap')
 
+    # Extract topic names for remapping, don't pass them as ROS params
+    # (they'd conflict with the remapping mechanism in rtabmap_slam)
+    rgb_topic = exo_params.pop('rgb_topic')
+    depth_topic = exo_params.pop('depth_topic')
+    camera_info_topic = exo_params.pop('camera_info_topic')
+
     # Base parameters for all nodes
     base_params = {
         'use_sim_time': use_sim_time,
@@ -50,15 +56,37 @@ def generate_launch_description():
         name='exo_rtabmap',
         parameters=[{**base_params, **exo_params}],
         remappings=[
-            ('rgb/image', exo_params['rgb_topic']),
-            ('depth/image', exo_params['depth_topic']),
-            ('rgb/camera_info', exo_params['camera_info_topic']),
+            ('rgb/image', rgb_topic),
+            ('depth/image', depth_topic),
+            ('rgb/camera_info', camera_info_topic),
+            ('depth/camera_info', camera_info_topic),
+            ('grid_map', '/map'),
         ],
-        arguments=['-d'],
         output='screen'
+    )
+
+    # Map Assembler: subscribes to core SLAM's map_graph and publishes /exo_rtabmap/cloud_map.
+    # Delayed 5s so rtabmap/get_map_data service is available at startup (avoids WARN
+    # and ensures full cloud map appears immediately rather than growing incrementally).
+    map_assembler = TimerAction(
+        period=5.0,
+        actions=[
+            Node(
+                package='rtabmap_util',
+                executable='map_assembler',
+                name='map_assembler',
+                parameters=[{'use_sim_time': use_sim_time}],
+                remappings=[
+                    ('map_graph', '/exo_rtabmap/map_graph'),
+                    ('cloud_map', '/exo_rtabmap/cloud_map'),
+                ],
+                output='screen'
+            )
+        ]
     )
 
     return LaunchDescription([
         use_sim_time_arg,
         exo_rtabmap,
+        map_assembler,
     ])
