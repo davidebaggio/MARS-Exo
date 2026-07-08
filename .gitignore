@@ -34,3 +34,6 @@ __pycache__/
 venv/
 # Virtual environments
 .vscode/
+.agents
+
+skills-lock.json
