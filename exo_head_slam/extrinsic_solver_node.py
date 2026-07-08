@@ -13,26 +13,28 @@ from sensor_msgs.msg import Image, PointCloud2, PointField
 from geometry_msgs.msg import TransformStamped
 from cv_bridge import CvBridge
 
-# Locate vggt directory dynamically
+# Locate eVGGT's vendored vggt directory dynamically
 _current_dir = os.path.dirname(os.path.abspath(__file__))
 vggt_path = None
+project_root = None
 for _ in range(6):
-    candidate = os.path.join(_current_dir, 'vggt')
+    candidate = os.path.join(_current_dir, 'eVGGT', 'policy', 'VGGT', 'vggt')
     if os.path.isdir(candidate):
         vggt_path = candidate
+        project_root = _current_dir
         break
     _current_dir = os.path.dirname(_current_dir)
 
 if vggt_path is None:
     raise RuntimeError(
-        "Could not locate the vendored 'vggt/' directory. "
-        "Clone VGGT into the package root or its parents."
+        "Could not locate eVGGT's vendored 'policy/VGGT/vggt/' directory. "
+        "Clone eVGGT into the package root or its parents."
     )
 
 if vggt_path not in sys.path:
     sys.path.insert(0, vggt_path)
 
-from vggt.models.vggt import VGGT
+from vggt.model.vggt_ldm import VGGT_LDM
 from vggt.utils.pose_enc import pose_encoding_to_extri_intri
 from vggt.utils.geometry import unproject_depth_map_to_point_map
 
@@ -53,6 +55,10 @@ class ExtrinsicSolverNode(Node):
         self.declare_parameter('min_solver_interval', 0.2)
         self.declare_parameter('max_trans_jump', 0.3)
         self.declare_parameter('max_rot_jump', 0.5)
+        self.declare_parameter(
+            'evggt_checkpoint_path',
+            os.path.join(vggt_path, '..', 'checkpoints', 'distillation', 'evggt_260m_512.pt')
+        )
 
         # VGGT depth-head confidence gating
         self.declare_parameter('depth_conf_mode', 'percentile')       # "percentile" | "absolute"
@@ -81,6 +87,10 @@ class ExtrinsicSolverNode(Node):
         self.min_solver_interval = float(self.get_parameter('min_solver_interval').value)
         self.max_trans_jump = float(self.get_parameter('max_trans_jump').value)
         self.max_rot_jump = float(self.get_parameter('max_rot_jump').value)
+        checkpoint_path = str(self.get_parameter('evggt_checkpoint_path').value)
+        if not os.path.isabs(checkpoint_path):
+            checkpoint_path = os.path.join(project_root, checkpoint_path)
+        self.evggt_checkpoint_path = os.path.abspath(checkpoint_path)
 
         self.depth_conf_mode = str(self.get_parameter('depth_conf_mode').value).lower()
         self.depth_conf_percentile = float(self.get_parameter('depth_conf_percentile').value)
@@ -114,7 +124,7 @@ class ExtrinsicSolverNode(Node):
         self.exo_combined_depth_pub = self.create_publisher(Image, '/exo/combined/depth_raw', 10)
         self.vggt_pcl_pub = self.create_publisher(PointCloud2, '/vggt/combined_pointcloud', 10)
 
-        # Initialize VGGT-1B on CUDA
+        # Initialize distilled eVGGT on CUDA
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         if self.device == "cuda":
             self.dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
@@ -123,10 +133,26 @@ class ExtrinsicSolverNode(Node):
             self.dtype = torch.float32
             self.autocast_ctx = torch.cpu.amp.autocast(enabled=False)
 
-        self.get_logger().info(f"Loading VGGT-1B on {self.device}...")
-        self.model = VGGT.from_pretrained("facebook/VGGT-1B").to(self.device)
+        self.get_logger().info(f"Loading eVGGT from {self.evggt_checkpoint_path} on {self.device}...")
+        self.model = VGGT_LDM(
+            latent_pretraining=False,
+            enable_point=False,
+            enable_track=False,
+        )
+        checkpoint = torch.load(self.evggt_checkpoint_path, map_location="cpu")
+        state_dict = checkpoint.get("state_dict", checkpoint)
+        state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+        missing, unexpected = self.model.load_state_dict(state_dict, strict=False)
+        if missing:
+            self.get_logger().warn(f"eVGGT missing checkpoint keys: {len(missing)}")
+        unexpected = [k for k in unexpected if not k.startswith(('point_head.', 'track_head.'))]
+        if unexpected:
+            self.get_logger().warn(f"eVGGT ignored checkpoint keys: {len(unexpected)}")
+        for param in self.model.parameters():
+            param.requires_grad = False
+        self.model = self.model.to(self.device)
         self.model.eval()
-        self.get_logger().info("VGGT-1B loaded successfully.")
+        self.get_logger().info("eVGGT loaded successfully.")
 
         # Subscriptions
         self.head_rgb_sub = message_filters.Subscriber(self, Image, self.head_rgb_topic)
