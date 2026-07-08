@@ -1,0 +1,9 @@
+[submodule "vggt"]
+	path = vggt
+	url = https://github.com/facebookresearch/vggt.git
+#[submodule "vggt-omega"]
+#	path = vggt-omega
+#	url = https://github.com/facebookresearch/vggt-omega.git
+#[submodule "eVGGT"]
+#	path = eVGGT
+#	url = https://github.com/andvg3/eVGGT.git
