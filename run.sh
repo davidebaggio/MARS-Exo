@@ -58,7 +58,13 @@ echo "Logging metrics to: $METRICS_CSV"
 # that rtabmap_msgs needs but fastcdr 2.2.5 lacks (needs 2.2.7+).
 export LD_PRELOAD="$(realpath lib/libfastcdr_compat.so)${LD_PRELOAD:+:$LD_PRELOAD}"
 
-ros2 launch exo_head_slam main_pipeline_launch.py use_sim_time:=true publish_debug_pcl:=true global_frame:=odom metrics_csv_path:="$METRICS_CSV" &
+USE_IMU=false
+if ros2 bag info "$BAG_PATH" 2>/dev/null | grep -q 'Topic: /camera/exo/imu | Type: sensor_msgs/msg/Imu'; then
+	USE_IMU=true
+fi
+echo "RTAB-Map IMU leveling: $USE_IMU"
+
+ros2 launch exo_head_slam main_pipeline_launch.py use_sim_time:=true publish_debug_pcl:=true global_frame:=odom metrics_csv_path:="$METRICS_CSV" use_imu:="$USE_IMU" imu_topic:=/camera/exo/imu &
 PIPELINE_PID=$!
 
 wait_for_pipeline

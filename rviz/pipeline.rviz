@@ -135,7 +135,7 @@ Visualization Manager:
       Value: true
   Global Options:
     Background Color: 48; 48; 48
-    Fixed Frame: map
+    Fixed Frame: viz_ground
     Frame Rate: 30
   Name: root
   Tools:

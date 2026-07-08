@@ -36,6 +36,34 @@ def generate_launch_description():
     )
     metrics_csv_path = LaunchConfiguration('metrics_csv_path')
 
+    use_imu_arg = DeclareLaunchArgument(
+        'use_imu',
+        default_value='false',
+        description='Use exo IMU for RTAB-Map odometry gravity initialization'
+    )
+    use_imu = LaunchConfiguration('use_imu')
+
+    imu_topic_arg = DeclareLaunchArgument(
+        'imu_topic',
+        default_value='/camera/exo/imu',
+        description='Raw exo IMU topic'
+    )
+    imu_topic = LaunchConfiguration('imu_topic')
+
+    filtered_imu_topic_arg = DeclareLaunchArgument(
+        'filtered_imu_topic',
+        default_value='/exo/imu/data',
+        description='Madgwick-filtered exo IMU topic for RTAB-Map'
+    )
+    filtered_imu_topic = LaunchConfiguration('filtered_imu_topic')
+
+    map_start_z_arg = DeclareLaunchArgument(
+        'map_start_z',
+        default_value='1',
+        description='Initial map height in the RViz ground frame, meters'
+    )
+    map_start_z = LaunchConfiguration('map_start_z')
+
     common_params = {'use_sim_time': use_sim_time}
 
     head_depth_preprocessor = Node(
@@ -113,6 +141,10 @@ def generate_launch_description():
         use_sim_time_arg,
         publish_debug_pcl_arg,
         metrics_csv_path_arg,
+        use_imu_arg,
+        imu_topic_arg,
+        filtered_imu_topic_arg,
+        map_start_z_arg,
     ]
 
     try:
@@ -123,7 +155,13 @@ def generate_launch_description():
                 PythonLaunchDescriptionSource(
                     PathJoinSubstitution([pkg_share, 'launch', 'rtabmap_agents_launch.py'])
                 ),
-                launch_arguments={'use_sim_time': use_sim_time}.items(),
+                launch_arguments={
+                    'use_sim_time': use_sim_time,
+                    'use_imu': use_imu,
+                    'imu_topic': imu_topic,
+                    'filtered_imu_topic': filtered_imu_topic,
+                    'map_start_z': map_start_z,
+                }.items(),
             )
         )
     except PackageNotFoundError:

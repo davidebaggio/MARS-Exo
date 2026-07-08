@@ -49,7 +49,7 @@ class ExtrinsicSolverNode(Node):
         self.declare_parameter('head_frame_id', 'head_link')
         self.declare_parameter('exo_frame_id', 'exo_link')
         self.declare_parameter('tf_filter_alpha', 0.5)
-        self.declare_parameter('sliding_window_size', 2)
+        self.declare_parameter('sliding_window_size', 4)
         self.declare_parameter('min_solver_interval', 0.2)
         self.declare_parameter('max_trans_jump', 0.3)
         self.declare_parameter('max_rot_jump', 0.5)

@@ -7,6 +7,7 @@ from launch import LaunchDescription
 from launch_ros.actions import Node
 from launch.substitutions import LaunchConfiguration
 from launch.actions import DeclareLaunchArgument, TimerAction
+from launch.conditions import IfCondition
 
 
 def load_section(config_path: str, section: str) -> dict:
@@ -26,6 +27,34 @@ def generate_launch_description():
         description='Use simulation time if true'
     )
     use_sim_time = LaunchConfiguration('use_sim_time')
+
+    use_imu_arg = DeclareLaunchArgument(
+        'use_imu',
+        default_value='false',
+        description='Use IMU orientation to initialize RTAB-Map odometry'
+    )
+    use_imu = LaunchConfiguration('use_imu')
+
+    imu_topic_arg = DeclareLaunchArgument(
+        'imu_topic',
+        default_value='/camera/exo/imu',
+        description='Raw exo IMU topic'
+    )
+    imu_topic = LaunchConfiguration('imu_topic')
+
+    filtered_imu_topic_arg = DeclareLaunchArgument(
+        'filtered_imu_topic',
+        default_value='/exo/imu/data',
+        description='Madgwick-filtered IMU topic'
+    )
+    filtered_imu_topic = LaunchConfiguration('filtered_imu_topic')
+
+    map_start_z_arg = DeclareLaunchArgument(
+        'map_start_z',
+        default_value='1',
+        description='Initial map height in the RViz ground frame, meters'
+    )
+    map_start_z = LaunchConfiguration('map_start_z')
 
     pkg_share = get_package_share_directory('exo_head_slam')
     config_dir = os.path.join(pkg_share, 'config')
@@ -47,8 +76,35 @@ def generate_launch_description():
         'qos_image': 2,
         'qos_depth': 2,
         'qos_camera_info': 2,
+        'qos_imu': 2,
     }
     odom_topic = '/exo_rtabmap/odom'
+
+    imu_filter = Node(
+        package='imu_filter_madgwick',
+        executable='imu_filter_madgwick_node',
+        name='exo_imu_filter',
+        parameters=[{
+            'use_sim_time': use_sim_time,
+            'use_mag': False,
+            'world_frame': 'enu',
+            'publish_tf': False,
+        }],
+        remappings=[
+            ('imu/data_raw', imu_topic),
+            ('imu/data', filtered_imu_topic),
+        ],
+        condition=IfCondition(use_imu),
+        output='screen',
+    )
+
+    viz_ground_to_map_tf = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='viz_ground_to_map_tf',
+        arguments=['--x', '0', '--y', '0', '--z', map_start_z, '--frame-id', 'viz_ground', '--child-frame-id', 'map'],
+        output='screen'
+    )
 
     map_to_odom_tf = Node(
         package='tf2_ros',
@@ -62,12 +118,13 @@ def generate_launch_description():
         package='rtabmap_odom',
         executable='rgbd_odometry',
         name='exo_rgbd_odometry',
-        parameters=[{**base_params, **exo_params, 'publish_tf': True}],
+        parameters=[{**base_params, **exo_params, 'publish_tf': True, 'wait_imu_to_init': use_imu, 'always_check_imu_tf': True}],
         remappings=[
             ('rgb/image', rgb_topic),
             ('depth/image', depth_topic),
             ('rgb/camera_info', camera_info_topic),
             ('odom', odom_topic),
+            ('imu', filtered_imu_topic),
         ],
         output='screen'
     )
@@ -111,7 +168,13 @@ def generate_launch_description():
 
     return LaunchDescription([
         use_sim_time_arg,
+        use_imu_arg,
+        imu_topic_arg,
+        filtered_imu_topic_arg,
+        map_start_z_arg,
+        viz_ground_to_map_tf,
         map_to_odom_tf,
+        imu_filter,
         exo_odometry,
         exo_rtabmap,
         map_assembler,
