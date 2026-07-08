@@ -9,7 +9,7 @@ The package cleans the depth, removes dynamic objects, estimates the rigid trans
 Produce a **single fused 3D map** in a shared coordinate system.
 
 Pipeline separates pose-tracking from inter-camera calibration + dense-depth reconstruction:
-* **RTAB-Map** runs on the **Exo camera** stream with **internal visual odometry** (no separate odom node). It broadcasts the full `map -> odom -> exo_link` TF and publishes the occupancy grid `/map` and `/exo_rtabmap/cloud_map`.
+* **RTAB-Map + RGB-D odometry** run on the **Exo camera** stream. `map -> odom` is static identity, `rgbd_odometry` publishes dynamic `odom -> exo_link`, and RTAB-Map publishes the occupancy grid `/map` plus `/exo_rtabmap/cloud_map`.
 * **The VGGT Extrinsic Solver** dynamically calculates and broadcasts the spatial link between the cameras (**`exo_link -> head_link`** TF) and the VGGT-1B world frame (**`exo_link -> vggt_world`** TF), and uses the VGGT depth-head confidence to gate the published `/vggt/combined_pointcloud`.
 * **Dense Reconstruction**: the pipeline publishes combined depths (`/head/combined/depth_raw`, `/exo/combined/depth_raw`) and the conf-filtered `/vggt/combined_pointcloud` directly to RViz. Isaac ROS NVBlox volumetric fusion was removed in the latest refactor — point cloud visualization replaces it.
 
@@ -79,12 +79,12 @@ Uses a detector-backed masking step (YOLOv8-seg via Ultralytics). Zeros out mask
 
 ## 3. Pose Tracking & SLAM (RTAB-Map)
 
-A single `rtabmap_slam` instance runs on the **Exo camera** stream. There is **no separate odometry node** — RTAB-Map computes its own visual odometry internally (`subscribe_odom_info := false`, `Odom/Strategy := 0` Frame-to-Map) and publishes the full `map -> odom -> exo_link` TF when `publish_tf := true` and `odom_frame_id` is set.
+RTAB-Map runs on the **Exo camera** stream with a separate `rgbd_odometry` node. The frame tree is fixed as `map -> odom` identity plus dynamic `odom -> exo_link` from visual odometry; the SLAM node consumes `/exo_rtabmap/odom` and does not publish `map -> odom` TF.
 
 ### Purpose
-* Provide robust Visual Odometry (VO) and loop closure in one node.
+* Provide RGB-D visual odometry and RTAB-Map mapping on the exo stream.
 * Calculate the camera's metric pose in the global frame.
-* Publish the `map -> odom -> exo_link` TF chain.
+* Publish `odom -> exo_link` from visual odometry while keeping `map -> odom` static identity.
 * Optionally publish the 2D occupancy grid `/map` and the assembled `/exo_rtabmap/cloud_map`.
 
 ## 4. Deep-Learning-Based Extrinsic Solver (VGGT)
@@ -120,7 +120,7 @@ Scale alignment uses a per-frame median ratio between raw metric depth and VGGT 
 * One extrinsic solver node (VGGT-based).
 * Two pointcloud publisher nodes (debug pcl for Head + Exo, behind `publish_debug_pcl`).
 * Static TF publishers for `exo_link -> exo_camera_link` and `head_link -> head_camera_link`.
-* Conditionally includes `launch/rtabmap_agents_launch.py` (only if `rtabmap_slam` is found) — a single `rtabmap_slam` node on the exo camera running internal visual odometry.
+* Conditionally includes `launch/rtabmap_agents_launch.py` (only if `rtabmap_slam` and `rtabmap_odom` are found) — RGB-D odometry plus RTAB-Map on the exo camera.
 
 ## Runtime Assumptions
 * RGB and depth images are published as ROS 2 topics.

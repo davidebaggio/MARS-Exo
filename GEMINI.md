@@ -14,8 +14,8 @@ The system decouples **map building / loop closure** (handled by RTAB-Map runnin
 - Filters dynamic objects from RGB and Depth streams using `ultralytics` (YOLOv8-seg). Pixels classified as dynamic are zeroed out to prevent "ghosting" in the map.
 
 ### 3. Pose Tracking & SLAM (`rtabmap_agents_launch.py`)
-- A single `rtabmap_slam` instance runs on the **exo camera** stream.
-- `subscribe_odom_info` is **disabled** — rtabmap_slam computes its own visual odometry internally and publishes the full `map -> odom -> exo_link` TF chain when `publish_tf := true` and `odom_frame_id` is set.
+- `rgbd_odometry` runs on the **exo camera** stream and publishes dynamic `odom -> exo_link`.
+- `map -> odom` is a static identity transform; `rtabmap_slam` consumes `/exo_rtabmap/odom` and does not publish map TF.
 - Occupancy grid (`/map`) and `/exo_rtabmap/cloud_map` are published when `RGBD/CreateOccupancyGrid`/`Grid/FromDepth` are `true`.
 
 ### 4. Extrinsic Solver (`extrinsic_solver_node.py`)
@@ -74,11 +74,11 @@ Publishes `/head/debug_pcl` and `/exo/debug_pcl` (PointCloud2 in local camera fr
 
 ## Configuration
 - **`head.yaml`** — depth_preprocessor and semantic_masker for the head camera.
-- **`exo.yaml`** — depth_preprocessor, semantic_masker, and the full `exo_rtabmap` parameter block (internal visual odom, occupancy grid, feature params).
+- **`exo.yaml`** — depth_preprocessor, semantic_masker, and the shared exo RTAB-Map / RGB-D odometry parameter block.
 - **`common.yaml`** — `extrinsic_solver` parameters: frame ids, sliding window, TF EMA, **VGGT confidence gating** (`depth_conf_mode`, `depth_conf_percentile`, `depth_conf_absolute`, `conf_gate_combine`, `conf_filter_pointcloud`), and metrics settings.
 
 ## Development Conventions
 - **Nodes:** All ROS 2 nodes are Python classes in `exo_head_slam/`.
 - **Utilities:** `exo_head_slam/utils/vision_utils.py` holds the `apply_semantic_mask` helper used by `semantic_masker_node`.
-- **TFs:** `map -> odom -> exo_link` comes from `rtabmap_slam`; static TFs publish `exo_link -> exo_camera_link` and `head_link -> head_camera_link`; the extrinsic solver publishes `exo_link -> head_link` and `exo_link -> vggt_world`.
-- **No fallback VO:** The plan deliberately removed the previous Python `fallback_vo` node and `rtabmapvisual_odometry` dependency — RTAB-Map's internal visual odometry is the only odometry source.
+- **TFs:** static `map -> odom` comes from the launch file, dynamic `odom -> exo_link` comes from `rgbd_odometry`, static camera TFs publish `exo_link -> exo_camera_link` and `head_link -> head_camera_link`, and the extrinsic solver publishes `exo_link -> head_link` plus `exo_link -> vggt_world`.
+- **Odometry source:** `rtabmap_odom/rgbd_odometry` publishes `odom -> exo_link`; the old static `odom -> exo_link` fallback was removed.

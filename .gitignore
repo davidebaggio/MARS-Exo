@@ -37,3 +37,4 @@ venv/
 .agents
 
 skills-lock.json
+*.txt

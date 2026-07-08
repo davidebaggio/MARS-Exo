@@ -29,7 +29,7 @@ After `colcon build`, the generated shim scripts in `install/exo_head_slam/lib/e
 ## Launch
 
 - **`launch/main_pipeline_launch.py`** — top-level entry point. Starts the custom nodes (depth_preprocessor x2, semantic_masker x2, extrinsic_solver, pointcloud_publisher x2 debug) + static TF publishers.
-- **`launch/rtabmap_agents_launch.py`** — conditionally included by the top launch only if `rtabmap_slam` is found. Launches a single `rtabmap_slam` instance on the **exo** camera running **internal visual odometry** (no separate odom node). Publishes `map -> odom -> exo_link` TFs. Silently skipped if `rtabmap_slam` is missing.
+- **`launch/rtabmap_agents_launch.py`** — conditionally included by the top launch only if `rtabmap_slam` and `rtabmap_odom` are found. Launches `rtabmap_odom/rgbd_odometry` plus `rtabmap_slam` on the **exo** camera. Publishes static `map -> odom` identity and dynamic `odom -> exo_link`. Silently skipped if `rtabmap_slam` or `rtabmap_odom` is missing.
 
 ## Configuration
 
@@ -53,7 +53,7 @@ Head RGB + depth → depth_preprocessor → semantic_masker ─┐
                                                           ├─ extrinsic_solver (VGGT-1B) → TF exo_link→head_link, vggt_world
 Exo RGB + depth  → depth_preprocessor → semantic_masker ─┘                                  ↘ combined depth fills, /vggt/combined_pointcloud
 
-RTAB-Map (exo, internal VO) → TF map→odom→exo_link  → exo_rtabmap/cloud_map + /map (optional)
+RTAB-Map + rgbd_odometry (exo) → static TF map→odom + dynamic TF odom→exo_link → exo_rtabmap/cloud_map + /map (optional)
 ```
 
 VGGT depth-head confidence (`depth_conf`, range `(1, +inf)`) gates:

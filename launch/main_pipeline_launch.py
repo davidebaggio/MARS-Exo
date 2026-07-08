@@ -117,6 +117,7 @@ def generate_launch_description():
 
     try:
         get_package_share_directory('rtabmap_slam')
+        get_package_share_directory('rtabmap_odom')
         actions.append(
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
@@ -126,7 +127,7 @@ def generate_launch_description():
             )
         )
     except PackageNotFoundError:
-        actions.append(LogInfo(msg='rtabmap_slam not found, skipping RTAB-Map launch.'))
+        actions.append(LogInfo(msg='rtabmap_slam or rtabmap_odom not found, skipping RTAB-Map launch.'))
 
     actions.extend([
         head_depth_preprocessor,

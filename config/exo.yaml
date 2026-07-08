@@ -27,7 +27,7 @@ exo_rtabmap:
     frame_id: "exo_link"
     map_frame_id: "map"
     odom_frame_id: "odom"
-    publish_tf: true            # publishes map->odom and odom->exo_link (internal visual odom)
+    publish_tf: true            # rgbd_odometry publishes odom->exo_link; rtabmap map TF is disabled in launch
     approx_sync: true
     approx_sync_max_interval: 0.2
     queue_size: 100
@@ -40,7 +40,7 @@ exo_rtabmap:
     Grid/FromDepth: "true"
     Grid/MaxGroundHeight: "0.1"
     Grid/MaxObstacleHeight: "2.0"
-    Odom/Strategy: "0" # Frame-to-Map internal visual odom
+    Odom/Strategy: "0" # Frame-to-Map visual odometry
     Vis/EstimationType: "0" # 3D->2D (PnP)
     Vis/MinInliers: "6"
     Vis/InlierDistance: "0.1"

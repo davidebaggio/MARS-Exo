@@ -17,9 +17,8 @@ def load_section(config_path: str, section: str) -> dict:
 
 def generate_launch_description():
     """
-    Launches a single RTAB-Map SLAM instance on the exo camera.
-    rtabmap_slam computes its own visual odometry internally (no external odom node).
-    Publishes map->odom and odom->exo_link TFs.
+    Launches RGB-D odometry plus RTAB-Map on the exo camera.
+    TF ownership: static map->odom identity, dynamic odom->exo_link from odometry.
     """
     use_sim_time_arg = DeclareLaunchArgument(
         'use_sim_time',
@@ -48,18 +47,42 @@ def generate_launch_description():
         'qos_depth': 2,
         'qos_camera_info': 2,
     }
+    odom_topic = '/exo_rtabmap/odom'
 
-    # SLAM Node (Exo) with internal visual odometry
+    map_to_odom_tf = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='map_to_odom_tf',
+        arguments=['--frame-id', 'map', '--child-frame-id', 'odom'],
+        output='screen'
+    )
+
+    exo_odometry = Node(
+        package='rtabmap_odom',
+        executable='rgbd_odometry',
+        name='exo_rgbd_odometry',
+        parameters=[{**base_params, **exo_params, 'publish_tf': True}],
+        remappings=[
+            ('rgb/image', rgb_topic),
+            ('depth/image', depth_topic),
+            ('rgb/camera_info', camera_info_topic),
+            ('odom', odom_topic),
+        ],
+        output='screen'
+    )
+
+    # SLAM Node (Exo): consumes odometry; map->odom is intentionally static.
     exo_rtabmap = Node(
         package='rtabmap_slam',
         executable='rtabmap',
         name='exo_rtabmap',
-        parameters=[{**base_params, **exo_params}],
+        parameters=[{**base_params, **exo_params, 'publish_tf': False, 'subscribe_odom_info': True}],
         remappings=[
             ('rgb/image', rgb_topic),
             ('depth/image', depth_topic),
             ('rgb/camera_info', camera_info_topic),
             ('depth/camera_info', camera_info_topic),
+            ('odom', odom_topic),
             ('grid_map', '/map'),
         ],
         output='screen'
@@ -87,6 +110,8 @@ def generate_launch_description():
 
     return LaunchDescription([
         use_sim_time_arg,
+        map_to_odom_tf,
+        exo_odometry,
         exo_rtabmap,
         map_assembler,
     ])

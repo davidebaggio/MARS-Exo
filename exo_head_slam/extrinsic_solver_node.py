@@ -92,7 +92,6 @@ class ExtrinsicSolverNode(Node):
 
         self.bridge = CvBridge()
         self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
-        self.static_tf_broadcaster = tf2_ros.StaticTransformBroadcaster(self)
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
@@ -140,11 +139,6 @@ class ExtrinsicSolverNode(Node):
             f"conf_mode={self.depth_conf_mode} gate_combine={self.conf_gate_combine} "
             f"filter_pcl={self.conf_filter_pointcloud}"
         )
-
-        # Static odom→exo_link identity bridge as fallback.
-        # RTAB-Map's dynamic /tf transform takes priority over this static one,
-        # so no TF conflict — the chain is always valid from startup.
-        self._broadcast_static_odom_bridge()
 
     def preprocess_cv2_image(self, cv_img, target_size=518):
         rgb_img = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
@@ -482,9 +476,6 @@ class ExtrinsicSolverNode(Node):
             self.broadcast_transform(e_rgb.header.stamp)
         if self.current_vggt_world_t is not None:
             self.broadcast_vggt_world_transform(e_rgb.header.stamp)
-        # odom→exo_link is provided as a static fallback (set at init).
-        # RTAB-Map's dynamic /tf odom→exo_link overrides it when available.
-
         if self.device == "cuda":
             torch.cuda.empty_cache()
 
@@ -596,21 +587,6 @@ class ExtrinsicSolverNode(Node):
         t_msg.transform.rotation.w = float(self.current_vggt_world_q[3])
 
         self.tf_broadcaster.sendTransform(t_msg)
-
-    def _broadcast_static_odom_bridge(self):
-        t_msg = TransformStamped()
-        t_msg.header.stamp = self.get_clock().now().to_msg()
-        t_msg.header.frame_id = 'odom'
-        t_msg.child_frame_id = self.exo_frame_id
-        t_msg.transform.translation.x = 0.0
-        t_msg.transform.translation.y = 0.0
-        t_msg.transform.translation.z = 0.0
-        t_msg.transform.rotation.x = 0.0
-        t_msg.transform.rotation.y = 0.0
-        t_msg.transform.rotation.z = 0.0
-        t_msg.transform.rotation.w = 1.0
-        self.static_tf_broadcaster.sendTransform(t_msg)
-        self.get_logger().info('Static odom→exo_link identity bridge published (fallback for RTAB-Map startup).')
 
     def _log_metrics(self, stamp_sec, status, scale=1.0,
                      head_depth_rmse=None, head_depth_mae=None,
