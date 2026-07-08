@@ -1,0 +1,3 @@
+[submodule "eVGGT"]
+	path = eVGGT
+	url = https://github.com/andvg3/eVGGT.git
