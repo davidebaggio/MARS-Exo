@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 
 from exo_head_slam.extrinsic_solver_node import ExtrinsicSolverNode
 
@@ -20,5 +21,23 @@ def test_blend_depth_prefers_camera_on_high_error():
     assert np.allclose(out, [1.15, 2.0, 1.0])
 
 
+def test_unproject_depth_map_identity_camera():
+    node = object.__new__(ExtrinsicSolverNode)
+    depth = torch.tensor([[[[1.0], [2.0]], [[3.0], [4.0]]]])
+    extrinsic = torch.eye(4)[:3].unsqueeze(0)
+    intrinsic = torch.eye(3).unsqueeze(0)
+
+    points = node.unproject_depth_map_to_point_map(depth, extrinsic, intrinsic)
+
+    expected = np.array([
+        [
+            [[0.0, 0.0, 1.0], [2.0, 0.0, 2.0]],
+            [[0.0, 3.0, 3.0], [4.0, 4.0, 4.0]],
+        ]
+    ])
+    assert np.allclose(points, expected)
+
+
 if __name__ == '__main__':
     test_blend_depth_prefers_camera_on_high_error()
+    test_unproject_depth_map_identity_camera()

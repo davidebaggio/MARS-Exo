@@ -13,28 +13,31 @@ from sensor_msgs.msg import Image, PointCloud2, PointField
 from geometry_msgs.msg import TransformStamped
 from cv_bridge import CvBridge
 
-# Locate vggt directory dynamically
+# Locate vggt-omega directory dynamically
 _current_dir = os.path.dirname(os.path.abspath(__file__))
-vggt_path = None
+repo_root = None
+vggt_omega_path = None
 for _ in range(6):
-    candidate = os.path.join(_current_dir, 'vggt')
+    candidate = os.path.join(_current_dir, 'vggt-omega')
     if os.path.isdir(candidate):
-        vggt_path = candidate
+        repo_root = _current_dir
+        vggt_omega_path = candidate
         break
     _current_dir = os.path.dirname(_current_dir)
 
-if vggt_path is None:
+if vggt_omega_path is None:
     raise RuntimeError(
-        "Could not locate the vendored 'vggt/' directory. "
-        "Clone VGGT into the package root or its parents."
+        "Could not locate the vendored 'vggt-omega/' directory. "
+        "Clone VGGT-Omega into the package root or its parents."
     )
 
-if vggt_path not in sys.path:
-    sys.path.insert(0, vggt_path)
+if vggt_omega_path not in sys.path:
+    sys.path.insert(0, vggt_omega_path)
 
-from vggt.models.vggt import VGGT
-from vggt.utils.pose_enc import pose_encoding_to_extri_intri
-from vggt.utils.geometry import unproject_depth_map_to_point_map
+from vggt_omega.models import VGGTOmega
+from vggt_omega.utils.pose_enc import encoding_to_camera
+
+VGGT_OMEGA_CHECKPOINT = os.path.join(repo_root, 'vggt_omega_1b_512.pt')
 
 
 class ExtrinsicSolverNode(Node):
@@ -114,8 +117,10 @@ class ExtrinsicSolverNode(Node):
         self.exo_combined_depth_pub = self.create_publisher(Image, '/exo/combined/depth_raw', 10)
         self.vggt_pcl_pub = self.create_publisher(PointCloud2, '/vggt/combined_pointcloud', 10)
 
-        # Initialize VGGT-1B on CUDA
+        # Initialize VGGT-Omega on CUDA
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        if self.device != "cuda":
+            raise RuntimeError("VGGT-Omega requires CUDA.")
         if self.device == "cuda":
             self.dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
             self.autocast_ctx = torch.cuda.amp.autocast(dtype=self.dtype)
@@ -123,10 +128,14 @@ class ExtrinsicSolverNode(Node):
             self.dtype = torch.float32
             self.autocast_ctx = torch.cpu.amp.autocast(enabled=False)
 
-        self.get_logger().info(f"Loading VGGT-1B on {self.device}...")
-        self.model = VGGT.from_pretrained("facebook/VGGT-1B").to(self.device)
+        if not os.path.isfile(VGGT_OMEGA_CHECKPOINT):
+            raise FileNotFoundError(f"VGGT-Omega checkpoint not found: {VGGT_OMEGA_CHECKPOINT}")
+
+        self.get_logger().info(f"Loading VGGT-Omega from {VGGT_OMEGA_CHECKPOINT} on {self.device}...")
+        self.model = VGGTOmega().to(self.device)
+        self.model.load_state_dict(torch.load(VGGT_OMEGA_CHECKPOINT, map_location="cpu"))
         self.model.eval()
-        self.get_logger().info("VGGT-1B loaded successfully.")
+        self.get_logger().info("VGGT-Omega loaded successfully.")
 
         # Subscriptions
         self.head_rgb_sub = message_filters.Subscriber(self, Image, self.head_rgb_topic)
@@ -141,17 +150,17 @@ class ExtrinsicSolverNode(Node):
         )
         self.ts.registerCallback(self.solve_callback)
         self.get_logger().info(
-            f"Extrinsic Solver Node (VGGT) online. "
+            f"Extrinsic Solver Node (VGGT-Omega) online. "
             f"conf_mode={self.depth_conf_mode} gate_combine={self.conf_gate_combine} "
             f"filter_pcl={self.conf_filter_pointcloud}"
         )
 
-    def preprocess_cv2_image(self, cv_img, target_size=518):
+    def preprocess_cv2_image(self, cv_img, target_size=512):
         rgb_img = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
         h, w, _ = rgb_img.shape
 
         new_width = target_size
-        new_height = int(round(h * (target_size / w) / 14) * 14)
+        new_height = int(round(h * (target_size / w) / 16) * 16)
 
         resized = cv2.resize(rgb_img, (new_width, new_height), interpolation=cv2.INTER_CUBIC)
 
@@ -163,7 +172,7 @@ class ExtrinsicSolverNode(Node):
         tensor = torch.from_numpy(resized).permute(2, 0, 1).float() / 255.0
         return tensor, h, w, new_height, crop_y
 
-    def postprocess_depth(self, pred_arr, orig_h, orig_w, new_height, crop_y, target_size=518):
+    def postprocess_depth(self, pred_arr, orig_h, orig_w, new_height, crop_y, target_size=512):
         if new_height > target_size:
             canvas = np.zeros((new_height, target_size), dtype=np.float32)
             canvas[crop_y : crop_y + target_size, :] = pred_arr
@@ -177,7 +186,7 @@ class ExtrinsicSolverNode(Node):
         arr_orig = cv2.resize(arr_resized, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
         return arr_orig
 
-    def preprocess_depth_to_vggt(self, depth_img, new_height, crop_y, target_size=518):
+    def preprocess_depth_to_vggt(self, depth_img, new_height, crop_y, target_size=512):
         depth = depth_img.astype(np.float32, copy=False)
         resized = cv2.resize(depth, (target_size, new_height), interpolation=cv2.INTER_LINEAR)
         if new_height > target_size:
@@ -231,6 +240,38 @@ class ExtrinsicSolverNode(Node):
     def _conf_mask(self, conf_np: np.ndarray) -> np.ndarray:
         return conf_np >= self._conf_threshold(conf_np)
 
+    def unproject_depth_map_to_point_map(self, depth_map: torch.Tensor, extrinsic: torch.Tensor, intrinsic: torch.Tensor) -> np.ndarray:
+        depth = depth_map.detach().float().cpu().numpy()[..., 0]
+        extrinsic = extrinsic.detach().float().cpu().numpy()
+        intrinsic = intrinsic.detach().float().cpu().numpy()
+        num_frames, height, width = depth.shape
+
+        y, x = np.meshgrid(np.arange(height), np.arange(width), indexing="ij")
+        x = np.broadcast_to(x[None], (num_frames, height, width))
+        y = np.broadcast_to(y[None], (num_frames, height, width))
+
+        fx = intrinsic[:, 0, 0][:, None, None]
+        fy = intrinsic[:, 1, 1][:, None, None]
+        cx = intrinsic[:, 0, 2][:, None, None]
+        cy = intrinsic[:, 1, 2][:, None, None]
+
+        camera_points = np.stack(
+            [
+                (x - cx) / fx * depth,
+                (y - cy) / fy * depth,
+                depth,
+            ],
+            axis=-1,
+        )
+
+        rotation = extrinsic[:, :3, :3]
+        translation = extrinsic[:, :3, 3]
+        return np.einsum(
+            "sij,shwj->shwi",
+            np.transpose(rotation, (0, 2, 1)),
+            camera_points - translation[:, None, None, :],
+        )
+
     def solve_callback(self, h_rgb: Image, h_depth: Image, e_rgb: Image, e_depth: Image):
         from scipy.spatial.transform import Rotation as R
 
@@ -240,7 +281,7 @@ class ExtrinsicSolverNode(Node):
                       (stamp_sec - self.last_solver_time) >= self.min_solver_interval)
 
         if run_solver:
-            self.get_logger().info("Solver: received synced quad. Estimating extrinsic & depth with VGGT...")
+            self.get_logger().info("Solver: received synced quad. Estimating extrinsic & depth with VGGT-Omega...")
             scale = 1.0
             head_depth_rmse = head_depth_mae = None
             exo_depth_rmse = exo_depth_mae = None
@@ -267,11 +308,11 @@ class ExtrinsicSolverNode(Node):
                 M = len(self.image_buffer)
 
                 with torch.no_grad(), self.autocast_ctx:
-                    aggregated_tokens_list, ps_idx = self.model.aggregator(images)
-                    pose_enc = self.model.camera_head(aggregated_tokens_list)[-1]
-                    extrinsic, intrinsic = pose_encoding_to_extri_intri(pose_enc, images.shape[-2:])
-                    depth_map, depth_conf = self.model.depth_head(aggregated_tokens_list, images, ps_idx)
-                    point_map_by_unprojection = unproject_depth_map_to_point_map(
+                    predictions = self.model(images)
+                    extrinsic, intrinsic = encoding_to_camera(predictions["pose_enc"], predictions["images"].shape[-2:])
+                    depth_map = predictions["depth"]
+                    depth_conf = predictions["depth_conf"]
+                    point_map_by_unprojection = self.unproject_depth_map_to_point_map(
                         depth_map.squeeze(0).float(),
                         extrinsic.squeeze(0).float(),
                         intrinsic.squeeze(0).float()
@@ -286,7 +327,7 @@ class ExtrinsicSolverNode(Node):
                 e_conf = depth_conf[0, 2 * M - 1].cpu().float().numpy()
 
                 self.get_logger().info(
-                    f"VGGT: depth_map={depth_map.shape} depth_conf={depth_conf.shape} "
+                    f"VGGT-Omega: depth_map={depth_map.shape} depth_conf={depth_conf.shape} "
                     f"point_map={point_map_by_unprojection.shape}"
                 )
 
