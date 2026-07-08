@@ -39,3 +39,9 @@ data
 *.png
 
 *.csv
+
+*.txt
+
+skills-lock.json
+
+.agents
