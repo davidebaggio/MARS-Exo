@@ -60,6 +60,9 @@ class ExtrinsicSolverNode(Node):
         self.declare_parameter('depth_conf_absolute', 1.5)            # conf threshold when mode=absolute
         self.declare_parameter('conf_gate_combine', True)              # gate raw+VGGT depth combine
         self.declare_parameter('conf_filter_pointcloud', True)        # percentile filter /vggt/combined_pointcloud
+        self.declare_parameter('depth_blend_error_threshold', 0.25)   # meters, camera depth is GT
+        self.declare_parameter('depth_blend_camera_weight', 0.85)     # 0..1, higher trusts camera more
+        self.declare_parameter('depth_blend_smooth_kernel', 5)        # odd Gaussian kernel, <=1 disables
 
         self.declare_parameter('metrics_enabled', False)
         self.declare_parameter('metrics_csv_path', 'extrinsic_metrics.csv')
@@ -84,6 +87,9 @@ class ExtrinsicSolverNode(Node):
         self.depth_conf_absolute = float(self.get_parameter('depth_conf_absolute').value)
         self.conf_gate_combine = bool(self.get_parameter('conf_gate_combine').value)
         self.conf_filter_pointcloud = bool(self.get_parameter('conf_filter_pointcloud').value)
+        self.depth_blend_error_threshold = max(0.0, float(self.get_parameter('depth_blend_error_threshold').value))
+        self.depth_blend_camera_weight = float(np.clip(self.get_parameter('depth_blend_camera_weight').value, 0.0, 1.0))
+        self.depth_blend_smooth_kernel = max(1, int(self.get_parameter('depth_blend_smooth_kernel').value))
 
         self.metrics_enabled = self.get_parameter('metrics_enabled').value
         self.metrics_csv_path = self.get_parameter('metrics_csv_path').value
@@ -170,6 +176,41 @@ class ExtrinsicSolverNode(Node):
 
         arr_orig = cv2.resize(arr_resized, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
         return arr_orig
+
+    def preprocess_depth_to_vggt(self, depth_img, new_height, crop_y, target_size=518):
+        depth = depth_img.astype(np.float32, copy=False)
+        resized = cv2.resize(depth, (target_size, new_height), interpolation=cv2.INTER_LINEAR)
+        if new_height > target_size:
+            return resized[crop_y : crop_y + target_size, :]
+        return resized
+
+    def smooth_valid_depth(self, depth):
+        k = self.depth_blend_smooth_kernel
+        if k <= 1:
+            return depth
+        if k % 2 == 0:
+            k += 1
+        valid = np.isfinite(depth) & (depth > 0.0)
+        values = np.where(valid, depth, 0.0).astype(np.float32)
+        weights = valid.astype(np.float32)
+        smooth_values = cv2.GaussianBlur(values, (k, k), 0)
+        smooth_weights = cv2.GaussianBlur(weights, (k, k), 0)
+        return np.where(smooth_weights > 1e-6, smooth_values / smooth_weights, depth)
+
+    def blend_depth(self, raw_depth, pred_depth, raw_valid, conf_mask):
+        use_vggt = ~raw_valid
+        if self.conf_gate_combine:
+            use_vggt = use_vggt & conf_mask
+
+        combined = np.where(use_vggt, pred_depth, raw_depth)
+        pred_smooth = self.smooth_valid_depth(pred_depth)
+        high_error = np.abs(pred_depth - raw_depth) > self.depth_blend_error_threshold
+        blend_mask = raw_valid & conf_mask & np.isfinite(pred_depth) & high_error
+        blended = self.depth_blend_camera_weight * raw_depth + (1.0 - self.depth_blend_camera_weight) * pred_smooth
+        combined = np.where(blend_mask, blended, combined)
+        combined = np.nan_to_num(combined, nan=0.0, posinf=0.0, neginf=0.0)
+        combined[combined < 0.0] = 0.0
+        return combined
 
     def tf_to_matrix(self, tf):
         mat = np.eye(4)
@@ -289,22 +330,8 @@ class ExtrinsicSolverNode(Node):
                 e_conf_mask_e = self._conf_mask(e_conf_orig)
                 conf_thr = self._conf_threshold(np.concatenate([h_conf_orig.ravel(), e_conf_orig.ravel()]))
 
-                # Combine depth maps: raw where valid, VGGT-scaled where invalid,
-                # optionally restricting VGGT fill to high-confidence pixels only.
-                h_use_vggt = ~h_valid
-                if self.conf_gate_combine:
-                    h_use_vggt = h_use_vggt & h_conf_mask_h
-                e_use_vggt = ~e_valid
-                if self.conf_gate_combine:
-                    e_use_vggt = e_use_vggt & e_conf_mask_e
-
-                h_combined = np.where(h_use_vggt, h_pred_orig_scaled, head_dep)
-                h_combined = np.nan_to_num(h_combined, nan=0.0, posinf=0.0, neginf=0.0)
-                h_combined[h_combined < 0.0] = 0.0
-
-                e_combined = np.where(e_use_vggt, e_pred_orig_scaled, exo_dep)
-                e_combined = np.nan_to_num(e_combined, nan=0.0, posinf=0.0, neginf=0.0)
-                e_combined[e_combined < 0.0] = 0.0
+                h_combined = self.blend_depth(head_dep, h_pred_orig_scaled, h_valid, h_conf_mask_h)
+                e_combined = self.blend_depth(exo_dep, e_pred_orig_scaled, e_valid, e_conf_mask_e)
 
                 h_msg = self.bridge.cv2_to_imgmsg(h_combined.astype(np.float32), encoding='32FC1')
                 h_msg.header = h_depth.header
@@ -341,9 +368,11 @@ class ExtrinsicSolverNode(Node):
                 e_pts = point_map_by_unprojection[2 * M - 1]
                 h_color = (h_tensor.permute(1, 2, 0).cpu().numpy() * 255.0).astype(np.uint8)
                 e_color = (e_tensor.permute(1, 2, 0).cpu().numpy() * 255.0).astype(np.uint8)
+                h_dep_vggt = self.preprocess_depth_to_vggt(head_dep, h_new_h, h_crop_y)
+                e_dep_vggt = self.preprocess_depth_to_vggt(exo_dep, e_new_h, e_crop_y)
                 self.publish_vggt_pointcloud(
                     h_pts, e_pts, h_color, e_color,
-                    h_pred_depth, e_pred_depth, h_conf, e_conf,
+                    h_pred_depth, e_pred_depth, h_dep_vggt, e_dep_vggt, h_conf, e_conf,
                     scale, e_rgb.header.stamp
                 )
 
@@ -480,19 +509,28 @@ class ExtrinsicSolverNode(Node):
             torch.cuda.empty_cache()
 
     def publish_vggt_pointcloud(self, h_pts, e_pts, h_color, e_color,
-                                h_pred_depth, e_pred_depth, h_conf, e_conf,
+                                h_pred_depth, e_pred_depth, h_raw_depth, e_raw_depth, h_conf, e_conf,
                                 scale, stamp):
-        h_pts_metric = h_pts * scale
-        e_pts_metric = e_pts * scale
         h_depth_scaled = h_pred_depth * scale
         e_depth_scaled = e_pred_depth * scale
+        h_raw_valid = (h_raw_depth > 0.1) & (h_raw_depth < 10.0) & np.isfinite(h_raw_depth)
+        e_raw_valid = (e_raw_depth > 0.1) & (e_raw_depth < 10.0) & np.isfinite(e_raw_depth)
+        h_conf_mask = self._conf_mask(h_conf)
+        e_conf_mask = self._conf_mask(e_conf)
+        h_blended_depth = self.blend_depth(h_raw_depth, h_depth_scaled, h_raw_valid, h_conf_mask)
+        e_blended_depth = self.blend_depth(e_raw_depth, e_depth_scaled, e_raw_valid, e_conf_mask)
 
-        h_valid = (h_depth_scaled > 0.1) & (h_depth_scaled < 6.0)
-        e_valid = (e_depth_scaled > 0.1) & (e_depth_scaled < 6.0)
+        h_ratio = np.divide(h_blended_depth, h_depth_scaled, out=np.ones_like(h_depth_scaled), where=h_depth_scaled > 1e-6)
+        e_ratio = np.divide(e_blended_depth, e_depth_scaled, out=np.ones_like(e_depth_scaled), where=e_depth_scaled > 1e-6)
+        h_pts_metric = h_pts * scale * h_ratio[..., None]
+        e_pts_metric = e_pts * scale * e_ratio[..., None]
+
+        h_valid = (h_blended_depth > 0.1) & (h_blended_depth < 6.0)
+        e_valid = (e_blended_depth > 0.1) & (e_blended_depth < 6.0)
 
         if self.conf_filter_pointcloud:
-            h_valid = h_valid & self._conf_mask(h_conf)
-            e_valid = e_valid & self._conf_mask(e_conf)
+            h_valid = h_valid & h_conf_mask
+            e_valid = e_valid & e_conf_mask
 
         h_pts_valid = h_pts_metric[h_valid]
         h_color_valid = h_color[h_valid]
