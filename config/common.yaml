@@ -19,3 +19,8 @@ extrinsic_solver:
     metrics_csv_path: "extrinsic_metrics.csv"
     gt_parent_frame: ""
     gt_child_frame: ""
+
+map_assembler:
+  ros__parameters:
+    Grid/DepthDecimation: "1"
+    Grid/CellSize: "0.01"

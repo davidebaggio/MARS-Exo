@@ -31,6 +31,7 @@ def generate_launch_description():
     config_dir = os.path.join(pkg_share, 'config')
 
     exo_config_path = os.path.join(config_dir, 'exo.yaml')
+    common_config_path = os.path.join(config_dir, 'common.yaml')
 
     exo_params = load_section(exo_config_path, 'exo_rtabmap')
 
@@ -98,7 +99,7 @@ def generate_launch_description():
                 package='rtabmap_util',
                 executable='map_assembler',
                 name='map_assembler',
-                parameters=[{'use_sim_time': use_sim_time}],
+                parameters=[common_config_path, {'use_sim_time': use_sim_time}],
                 remappings=[
                     ('map_graph', '/exo_rtabmap/map_graph'),
                     ('cloud_map', '/exo_rtabmap/cloud_map'),
