@@ -59,7 +59,7 @@ Important files:
 | `config/common.yaml` | VGGT-Omega solver parameters, confidence gates, metrics |
 | `pipeline.md` | More detailed architecture notes |
 | `plot_metrics.py` | Plots solver and depth-estimation metrics |
-| `tests/test_depth_blend.py` | Minimal self-check for depth blending behavior |
+| `tests/test_depth_blend.py` | Minimal self-check for depth hole-fill behavior |
 
 ## Dependencies
 
@@ -193,8 +193,6 @@ Important solver parameters:
 - `depth_conf_absolute`
 - `conf_gate_combine`
 - `conf_filter_pointcloud`
-- `depth_blend_error_threshold`
-- `depth_blend_camera_weight`
 - `metrics_enabled`
 - `metrics_csv_path`
 

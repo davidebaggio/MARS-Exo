@@ -14,9 +14,6 @@ extrinsic_solver:
     depth_conf_absolute: 1.5            # conf threshold when mode=absolute (range is (1, +inf))
     conf_gate_combine: true             # gate raw+VGGT depth fill by conf mask
     conf_filter_pointcloud: true        # percentile-filter /vggt/combined_pointcloud
-    depth_blend_error_threshold: 0.15   # meters; camera depth is treated as GT
-    depth_blend_camera_weight: 0.5     # high-error blend = 85% camera + 15% smoothed VGGT
-    depth_blend_smooth_kernel: 5        # odd Gaussian kernel; <=1 disables smoothing
     # Metrics
     metrics_enabled: true
     metrics_csv_path: "extrinsic_metrics.csv"
