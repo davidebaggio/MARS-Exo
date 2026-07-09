@@ -20,36 +20,3 @@ exo_semantic_masker:
     masker.conf_threshold: 0.20
     masker.dynamic_classes: [0, 1, 2, 3, 5, 7]
     sync_slop: 0.02
-
-exo_rtabmap:
-  ros__parameters:
-    subscribe_depth: true
-    frame_id: "exo_link"
-    map_frame_id: "map"
-    odom_frame_id: "odom"
-    publish_tf: true            # rgbd_odometry publishes odom->exo_link; rtabmap map TF is disabled in launch
-    approx_sync: true
-    approx_sync_max_interval: 0.02
-    queue_size: 100
-    sync_queue_size: 100
-    wait_for_transform: 0.5
-    rgb_topic: "/exo/masked/image_raw"
-    depth_topic: "/exo/masked/depth_raw"
-    camera_info_topic: "/camera/exo/color/camera_info"
-    RGBD/CreateOccupancyGrid: "true"
-    Grid/FromDepth: "true"
-    Grid/MaxGroundHeight: "0.1"
-    Grid/MaxObstacleHeight: "2.0"
-    Odom/Strategy: "0" # Frame-to-Map visual odometry
-    OdomF2M/BundleAdjustment: "0" # avoid BA dropping otherwise usable low-inlier frames
-    Vis/EstimationType: "0" # 3D->2D (PnP)
-    Vis/MinInliers: "4"
-    Vis/InlierDistance: "0.1"
-    Vis/CorGuessWinSize: "0"
-    Vis/FeatureType: "8" # GFTT/ORB
-    Vis/MaxFeatures: "1000"
-    # Smoothing & Convergence parameters
-    Rtabmap/DetectionRate: "1"
-    RGBD/LinearUpdate: "0.01"
-    RGBD/AngularUpdate: "0.01"
-    RGBD/OptimizeMaxError: "0.1"

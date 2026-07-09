@@ -9,7 +9,7 @@ The package cleans the depth, removes dynamic objects, estimates the rigid trans
 Produce a **single fused 3D map** in a shared coordinate system.
 
 Pipeline separates pose-tracking from inter-camera calibration + dense-depth reconstruction:
-* **RTAB-Map + RGB-D odometry** run on the **Exo camera** stream. `map -> odom` is static identity, `rgbd_odometry` publishes dynamic `odom -> exo_link`, and RTAB-Map publishes the occupancy grid `/map` plus `/exo_rtabmap/cloud_map`.
+* **ORB-SLAM3 RGB-D-inertial tracking** runs on the **Exo camera** stream. `odom -> exo_link` is published by ORB-SLAM3, and a lightweight dense accumulator publishes `/orbslam/cloud_map` in the odom frame.
 * **The VGGT Extrinsic Solver** dynamically calculates and broadcasts the spatial link between the cameras (**`exo_link -> head_link`** TF) and the VGGT-1B world frame (**`exo_link -> vggt_world`** TF), and uses the VGGT depth-head confidence to gate the published `/vggt/combined_pointcloud`.
 * **Dense Reconstruction**: the pipeline publishes combined depths (`/head/combined/depth_raw`, `/exo/combined/depth_raw`) and the conf-filtered `/vggt/combined_pointcloud` directly to RViz. Isaac ROS NVBlox volumetric fusion was removed in the latest refactor — point cloud visualization replaces it.
 
@@ -30,9 +30,9 @@ flowchart TD
     A3 --> C2
 
     %% Tracking
-    C2 --> D_SLAM[RTAB-Map SLAM (internal VO)]
-    D_SLAM --> |TF: map -> odom -> exo_link| TF_TREE((TF Tree))
-    D_SLAM --> |/map, /exo_rtabmap/cloud_map| RV[RViz Visualization]
+    C2 --> D_SLAM[ORB-SLAM3 RGB-D-Inertial]
+    D_SLAM --> |TF: odom -> exo_link| TF_TREE((TF Tree))
+    D_SLAM --> |/orbslam/cloud_map| RV[RViz Visualization]
 
     %% Extrinsics
     C1 --> F[VGGT Extrinsic Solver]
@@ -71,21 +71,21 @@ Each depth preprocessor reads the input topic from YAML, sanitizes invalid value
 Removes dynamic objects from the RGB and depth images. People and moving machinery can corrupt geometric tracking and introduce "ghosting" in the final 3D map.
 
 ### Purpose
-* Maintain strict static scene geometry for RTAB-Map.
+* Maintain strict static scene geometry for the exo tracking stream.
 * Prevent dynamic obstacles from becoming permanent fixtures in the 3D map.
 
 ### Current Behavior
 Uses a detector-backed masking step (YOLOv8-seg via Ultralytics). Zeros out masked pixels in both the RGB and Depth images.
 
-## 3. Pose Tracking & SLAM (RTAB-Map)
+## 3. Pose Tracking & SLAM (ORB-SLAM3)
 
-RTAB-Map runs on the **Exo camera** stream with a separate `rgbd_odometry` node. The frame tree is fixed as `map -> odom` identity plus dynamic `odom -> exo_link` from visual odometry; the SLAM node consumes `/exo_rtabmap/odom` and does not publish `map -> odom` TF.
+ORB-SLAM3 runs on the **Exo camera** stream with inertial input from `/camera/exo/imu`. The frame tree is fixed as `map -> odom` identity plus dynamic `odom -> exo_link` from ORB tracking. A dense accumulator projects `/exo/combined/depth_raw` into the odom frame and publishes `/orbslam/cloud_map`.
 
 ### Purpose
-* Provide RGB-D visual odometry and RTAB-Map mapping on the exo stream.
+* Provide RGB-D-inertial tracking on the exo stream.
 * Calculate the camera's metric pose in the global frame.
-* Publish `odom -> exo_link` from visual odometry while keeping `map -> odom` static identity.
-* Optionally publish the 2D occupancy grid `/map` and the assembled `/exo_rtabmap/cloud_map`.
+* Publish `odom -> exo_link` from ORB-SLAM3 while keeping `map -> odom` static identity.
+* Accumulate a dense colored global cloud in the odom frame.
 
 ## 4. Deep-Learning-Based Extrinsic Solver (VGGT)
 
@@ -109,7 +109,8 @@ Scale alignment uses a per-frame median ratio between raw metric depth and VGGT 
 ## Configuration Layout
 
 * `config/head.yaml`: Head camera depth_preprocessor + semantic_masker topics/params.
-* `config/exo.yaml`: Exo camera depth_preprocessor, semantic_masker, and the full `exo_rtabmap` parameter block.
+* `config/exo.yaml`: Exo camera depth_preprocessor and semantic_masker parameters.
+* `config/orbslam3_exo.yaml`: ORB-SLAM3 settings template.
 * `config/common.yaml`: `extrinsic_solver` params — frame ids, sliding window, TF EMA, VGGT confidence gating params, metrics.
 
 ## Launch Structure
@@ -120,7 +121,7 @@ Scale alignment uses a per-frame median ratio between raw metric depth and VGGT 
 * One extrinsic solver node (VGGT-based).
 * Two pointcloud publisher nodes (debug pcl for Head + Exo, behind `publish_debug_pcl`).
 * Static TF publishers for `exo_link -> exo_camera_link` and `head_link -> head_camera_link`.
-* Conditionally includes `launch/rtabmap_agents_launch.py` (only if `rtabmap_slam` and `rtabmap_odom` are found) — RGB-D odometry plus RTAB-Map on the exo camera.
+* Includes `launch/orbslam3_exo_launch.py` — ORB-SLAM3 on the exo camera plus the dense global map accumulator.
 
 ## Runtime Assumptions
 * RGB and depth images are published as ROS 2 topics.

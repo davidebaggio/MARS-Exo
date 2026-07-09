@@ -1,9 +1,7 @@
 from launch import LaunchDescription
 from launch.actions import IncludeLaunchDescription
-from launch.actions import LogInfo
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
-from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
 from launch.substitutions import PathJoinSubstitution, LaunchConfiguration
 from launch_ros.substitutions import FindPackageShare
 from launch.actions import DeclareLaunchArgument
@@ -29,19 +27,19 @@ def generate_launch_description():
     )
     publish_debug_pcl = LaunchConfiguration('publish_debug_pcl')
 
-    metrics_csv_path_arg = DeclareLaunchArgument(
-        'metrics_csv_path',
-        default_value='extrinsic_metrics.csv',
-        description='Path to the metrics CSV file'
+    orbslam3_vocabulary_path_arg = DeclareLaunchArgument(
+        'orbslam3_vocabulary_path',
+        default_value='third_party/ORB_SLAM3/Vocabulary/ORBvoc.txt',
+        description='Path to the ORB-SLAM3 vocabulary file'
     )
-    metrics_csv_path = LaunchConfiguration('metrics_csv_path')
+    orbslam3_vocabulary_path = LaunchConfiguration('orbslam3_vocabulary_path')
 
-    use_imu_arg = DeclareLaunchArgument(
-        'use_imu',
-        default_value='false',
-        description='Use exo IMU for RTAB-Map odometry gravity initialization'
+    orbslam3_settings_path_arg = DeclareLaunchArgument(
+        'orbslam3_settings_path',
+        default_value=PathJoinSubstitution([pkg_share, 'config', 'orbslam3_exo.yaml']),
+        description='Path to the ORB-SLAM3 settings file'
     )
-    use_imu = LaunchConfiguration('use_imu')
+    orbslam3_settings_path = LaunchConfiguration('orbslam3_settings_path')
 
     imu_topic_arg = DeclareLaunchArgument(
         'imu_topic',
@@ -50,12 +48,12 @@ def generate_launch_description():
     )
     imu_topic = LaunchConfiguration('imu_topic')
 
-    filtered_imu_topic_arg = DeclareLaunchArgument(
-        'filtered_imu_topic',
-        default_value='/exo/imu/data',
-        description='Madgwick-filtered exo IMU topic for RTAB-Map'
+    slam_mode_arg = DeclareLaunchArgument(
+        'slam_mode',
+        default_value='IMU_RGBD',
+        description='ORB-SLAM3 mode: IMU_RGBD (with IMU) or RGBD (visual only)'
     )
-    filtered_imu_topic = LaunchConfiguration('filtered_imu_topic')
+    slam_mode = LaunchConfiguration('slam_mode')
 
     map_start_z_arg = DeclareLaunchArgument(
         'map_start_z',
@@ -63,6 +61,41 @@ def generate_launch_description():
         description='Initial map height in the RViz ground frame, meters'
     )
     map_start_z = LaunchConfiguration('map_start_z')
+
+    dense_map_voxel_size_arg = DeclareLaunchArgument(
+        'dense_map_voxel_size',
+        default_value='0.03',
+        description='Voxel size in meters for the accumulated global cloud'
+    )
+    dense_map_voxel_size = LaunchConfiguration('dense_map_voxel_size')
+
+    dense_map_max_points_arg = DeclareLaunchArgument(
+        'dense_map_max_points',
+        default_value='250000',
+        description='Maximum accumulated points in the global cloud'
+    )
+    dense_map_max_points = LaunchConfiguration('dense_map_max_points')
+
+    dense_map_downsample_factor_arg = DeclareLaunchArgument(
+        'dense_map_downsample_factor',
+        default_value='2',
+        description='Per-frame downsample factor before projection'
+    )
+    dense_map_downsample_factor = LaunchConfiguration('dense_map_downsample_factor')
+
+    dense_map_min_depth_arg = DeclareLaunchArgument(
+        'dense_map_min_depth',
+        default_value='0.1',
+        description='Minimum depth accepted by the dense accumulator'
+    )
+    dense_map_min_depth = LaunchConfiguration('dense_map_min_depth')
+
+    dense_map_max_depth_arg = DeclareLaunchArgument(
+        'dense_map_max_depth',
+        default_value='10.0',
+        description='Maximum depth accepted by the dense accumulator'
+    )
+    dense_map_max_depth = LaunchConfiguration('dense_map_max_depth')
 
     common_params = {'use_sim_time': use_sim_time}
 
@@ -101,7 +134,7 @@ def generate_launch_description():
         package='exo_head_slam',
         executable='extrinsic_solver',
         name='extrinsic_solver',
-        parameters=[common_config, exo_config, common_params, {'metrics_csv_path': metrics_csv_path}],
+        parameters=[common_config, exo_config, common_params],
     )
 
     # Debug PointCloud Publishers
@@ -135,37 +168,41 @@ def generate_launch_description():
         condition=IfCondition(publish_debug_pcl)
     )
 
-    # Start RTAB-Map early so it initializes before data flows (service ready
-    # by the time map_assembler fires after its 5s TimerAction delay).
     actions = [
         use_sim_time_arg,
         publish_debug_pcl_arg,
-        metrics_csv_path_arg,
-        use_imu_arg,
+        orbslam3_vocabulary_path_arg,
+        orbslam3_settings_path_arg,
         imu_topic_arg,
-        filtered_imu_topic_arg,
+        slam_mode_arg,
         map_start_z_arg,
+        dense_map_voxel_size_arg,
+        dense_map_max_points_arg,
+        dense_map_downsample_factor_arg,
+        dense_map_min_depth_arg,
+        dense_map_max_depth_arg,
     ]
 
-    try:
-        get_package_share_directory('rtabmap_slam')
-        get_package_share_directory('rtabmap_odom')
-        actions.append(
-            IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(
-                    PathJoinSubstitution([pkg_share, 'launch', 'rtabmap_agents_launch.py'])
-                ),
-                launch_arguments={
-                    'use_sim_time': use_sim_time,
-                    'use_imu': use_imu,
-                    'imu_topic': imu_topic,
-                    'filtered_imu_topic': filtered_imu_topic,
-                    'map_start_z': map_start_z,
-                }.items(),
-            )
+    actions.append(
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                PathJoinSubstitution([pkg_share, 'launch', 'orbslam3_exo_launch.py'])
+            ),
+            launch_arguments={
+                'use_sim_time': use_sim_time,
+                'orbslam3_vocabulary_path': orbslam3_vocabulary_path,
+                'orbslam3_settings_path': orbslam3_settings_path,
+                'imu_topic': imu_topic,
+                'slam_mode': slam_mode,
+                'map_start_z': map_start_z,
+                'dense_map_voxel_size': dense_map_voxel_size,
+                'dense_map_max_points': dense_map_max_points,
+                'dense_map_downsample_factor': dense_map_downsample_factor,
+                'dense_map_min_depth': dense_map_min_depth,
+                'dense_map_max_depth': dense_map_max_depth,
+            }.items(),
         )
-    except PackageNotFoundError:
-        actions.append(LogInfo(msg='rtabmap_slam or rtabmap_odom not found, skipping RTAB-Map launch.'))
+    )
 
     actions.extend([
         head_depth_preprocessor,

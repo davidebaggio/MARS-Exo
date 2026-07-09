@@ -13,6 +13,7 @@
   <depend>tf2_ros</depend>
   <depend>cv_bridge</depend>
   <depend>message_filters</depend>
+  <depend>orbslam3_ros2</depend>
   <depend>python3-numpy</depend>
   <depend>python3-opencv</depend>
   <depend>python3-yaml</depend>

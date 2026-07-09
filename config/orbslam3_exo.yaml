@@ -1,0 +1,42 @@
+%YAML:1.0
+
+Camera.fx: 617.201
+Camera.fy: 617.362
+Camera.cx: 324.637
+Camera.cy: 242.462
+Camera.bf: 45.989
+Camera.width: 640
+Camera.height: 480
+Camera.fps: 30
+Camera.RGB: 1
+ThDepth: 40.0
+RGBD.DepthMapFactor: 1.0
+IMU.T_b_c1: !!opencv-matrix
+   rows: 4
+   cols: 4
+   dt: f
+   data: [0.999903, -0.0138036, -0.00208099, -0.0202141,
+          0.0137985, 0.999902, -0.00243498, 0.00505961,
+          0.0021144, 0.00240603, 0.999995, 0.0114047,
+          0.0, 0.0, 0.0, 1.0]
+IMU.InsertKFsWhenLost: 0
+IMU.NoiseGyro: 1e-2
+IMU.NoiseAcc: 1e-1
+IMU.GyroWalk: 1e-6
+IMU.AccWalk: 1e-4
+IMU.Frequency: 200
+ORBextractor.nFeatures: 1250
+ORBextractor.scaleFactor: 1.2
+ORBextractor.nLevels: 8
+ORBextractor.iniThFAST: 20
+ORBextractor.minThFAST: 7
+Viewer.KeyFrameSize: 0.05
+Viewer.KeyFrameLineWidth: 1.0
+Viewer.GraphLineWidth: 0.9
+Viewer.PointSize: 2.0
+Viewer.CameraSize: 0.08
+Viewer.CameraLineWidth: 3.0
+Viewer.ViewpointX: 0.0
+Viewer.ViewpointY: -0.7
+Viewer.ViewpointZ: -3.5
+Viewer.ViewpointF: 500.0

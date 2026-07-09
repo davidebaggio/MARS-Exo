@@ -22,13 +22,15 @@ cleanup() {
 	pkill -f 'depth_preprocessor' || true
 	pkill -f 'semantic_masker' || true
 	pkill -f 'extrinsic_solver' || true
+	pkill -f 'orbslam3_rgbd_imu' || true
+	pkill -f 'dense_global_map' || true
 	pkill -f 'ros2 bag play' || true
 }
 
 wait_for_pipeline() {
 	local attempts=30
 	while [[ "$attempts" -gt 0 ]]; do
-		if ros2 node list 2>/dev/null | grep -qE '(/head_semantic_masker|/exo_semantic_masker|/extrinsic_solver)'; then
+		if ros2 node list 2>/dev/null | grep -qE '(/orbslam3_exo|/dense_global_map_accumulator|/extrinsic_solver)'; then
 			return 0
 		fi
 		attempts=$((attempts - 1))
@@ -51,22 +53,18 @@ if [ -d "install/exo_head_slam/lib/exo_head_slam" ]; then
     sed -i "1s|^#!.*python.*|#!$(which python3)|" install/exo_head_slam/lib/exo_head_slam/*
 fi
 
-TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-mkdir -p metrics/pipeline
-METRICS_CSV="metrics/pipeline/metrics_${TIMESTAMP}.csv"
-echo "Logging metrics to: $METRICS_CSV"
-
-# Preload fastcdr compat shim to provide missing serialize(unsigned int) symbol
-# that rtabmap_msgs needs but fastcdr 2.2.5 lacks (needs 2.2.7+).
-export LD_PRELOAD="$(realpath lib/libfastcdr_compat.so)${LD_PRELOAD:+:$LD_PRELOAD}"
-
-USE_IMU=false
-if ros2 bag info "$BAG_PATH" 2>/dev/null | grep -q 'Topic: /camera/exo/imu | Type: sensor_msgs/msg/Imu'; then
-	USE_IMU=true
-fi
-echo "RTAB-Map IMU leveling: $USE_IMU"
-
-ros2 launch exo_head_slam main_pipeline_launch.py use_sim_time:=true publish_debug_pcl:=true global_frame:=odom metrics_csv_path:="$METRICS_CSV" use_imu:="$USE_IMU" imu_topic:=/camera/exo/imu &
+ros2 launch exo_head_slam main_pipeline_launch.py \
+	use_sim_time:=true \
+	publish_debug_pcl:=true \
+	imu_topic:=/camera/exo/imu \
+	orbslam3_vocabulary_path:=third_party/ORB_SLAM3/Vocabulary/ORBvoc.txt \
+	orbslam3_settings_path:=config/orbslam3_exo.yaml \
+	map_start_z:=1 \
+	dense_map_voxel_size:=0.03 \
+	dense_map_max_points:=250000 \
+	dense_map_downsample_factor:=2 \
+	dense_map_min_depth:=0.1 \
+	dense_map_max_depth:=10.0 &
 PIPELINE_PID=$!
 
 wait_for_pipeline

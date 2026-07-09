@@ -10,18 +10,22 @@ The pipeline:
 
 1. Filters head and exo depth streams.
 2. Masks dynamic objects from RGB-D frames.
-3. Runs RTAB-Map RGB-D odometry / mapping on the exo stream.
+3. Runs ORB-SLAM3 RGB-D-inertial tracking on the exo stream.
 4. Runs a VGGT-Omega extrinsic solver on synchronized head/exo images.
-5. Publishes combined depth images and point clouds for RViz visualization.
+5. Accumulates a dense global exo cloud in the ORB odom frame and publishes the combined depth / debug point clouds for RViz.
 
 Data flow:
 
 ```text
 Head RGB + depth -> depth_preprocessor -> semantic_masker ---------.
                                                                    |
-Exo RGB + depth  -> depth_preprocessor -> semantic_masker -> RTAB-Map -> TF tree
-                                            |                      |
-                                            '-> VGGT-Omega solver -'
+Exo RGB + depth  -> depth_preprocessor -> semantic_masker -> ORB-SLAM3 -> /exo/odom + TF
+                                            |
+                                            '-> Dense global cloud accumulator -> /orbslam/cloud_map
+
+Exo RGB + depth  -> depth_preprocessor -> semantic_masker ---------.
+                                                                   |
+                                                                   '-> VGGT-Omega solver -
 
 VGGT-Omega solver -> /head/combined/depth_raw
 VGGT-Omega solver -> /exo/combined/depth_raw
@@ -53,9 +57,10 @@ Important files:
 | Path | Purpose |
 |---|---|
 | `launch/main_pipeline_launch.py` | Top-level launch file |
-| `launch/rtabmap_agents_launch.py` | RTAB-Map odometry / mapping launch |
+| `launch/orbslam3_exo_launch.py` | ORB-SLAM3 odometry + dense global map launch |
 | `config/head.yaml` | Head camera topics and masking/filtering parameters |
-| `config/exo.yaml` | Exo camera topics and RTAB-Map parameters |
+| `config/exo.yaml` | Exo camera topics and masking/filtering parameters |
+| `config/orbslam3_exo.yaml` | ORB-SLAM3 settings template |
 | `config/common.yaml` | VGGT-Omega solver parameters, confidence gates, metrics |
 | `pipeline.md` | More detailed architecture notes |
 | `plot_metrics.py` | Plots solver and depth-estimation metrics |
@@ -71,7 +76,7 @@ Base requirements:
 - NumPy, OpenCV, SciPy
 - PyTorch with CUDA
 - `ultralytics` for YOLOv8 segmentation
-- `rtabmap_slam` and `rtabmap_odom` for exo RGB-D odometry / mapping
+- ORB-SLAM3 + Pangolin built under `third_party/ORB_SLAM3` and `third_party/Pangolin`
 
 VGGT-Omega-specific requirements:
 
@@ -122,8 +127,10 @@ Common launch arguments:
 ros2 launch exo_head_slam main_pipeline_launch.py \
   use_sim_time:=true \
   publish_debug_pcl:=true \
-  metrics_csv_path:=metrics/pipeline/run.csv \
-  use_imu:=false
+  orbslam3_vocabulary_path:=third_party/ORB_SLAM3/Vocabulary/ORBvoc.txt \
+  orbslam3_settings_path:=config/orbslam3_exo.yaml \
+  dense_map_voxel_size:=0.03 \
+  dense_map_max_points:=250000
 ```
 
 Run against the default bag and open RViz:
@@ -168,12 +175,16 @@ VGGT-Omega outputs:
 - TF `exo_link -> head_link`
 - TF `exo_link -> vggt_world`
 
+ORB-SLAM3 outputs:
+
+- `/exo/odom`
+- TF `odom -> exo_link`
+- `/orbslam/cloud_map`
+
 Debug outputs:
 
 - `/head/debug_pcl`
 - `/exo/debug_pcl`
-
-RTAB-Map outputs include odometry, `/map`, and RTAB-Map cloud/map topics depending on installed RTAB-Map packages and launch parameters.
 
 ## Configuration
 
@@ -181,7 +192,7 @@ Runtime behavior is YAML-driven:
 
 - Camera topics and depth filter parameters: `config/head.yaml`, `config/exo.yaml`
 - Semantic mask classes and confidence thresholds: `masker.*` parameters
-- RTAB-Map parameters: `exo_rtabmap` in `config/exo.yaml`
+- ORB-SLAM3 settings template: `config/orbslam3_exo.yaml`
 - VGGT-Omega solver parameters: `extrinsic_solver` in `config/common.yaml`
 
 Important solver parameters:
@@ -227,6 +238,6 @@ If the VGGT-Omega solver cannot start, check that the `vggt-omega` submodule is 
 
 If masks are empty, check `ultralytics` and the YOLO model path in the YAML config.
 
-If RTAB-Map is skipped, install/source `rtabmap_slam` and `rtabmap_odom`.
+If ORB-SLAM3 fails to start, check `ORB_SLAM3_ROOT`, `third_party/ORB_SLAM3/lib/libORB_SLAM3.so`, and the vocabulary/settings paths passed to launch.
 
 If running bags, use `use_sim_time:=true` and verify `/clock` is being published.
