@@ -95,7 +95,7 @@ Visualization Manager:
       Value: true
     - Class: rviz_default_plugins/PointCloud2
       Color Transformer: RGB8
-      Enabled: true
+      Enabled: false
       Name: RtabmapCloud
       Size (Pixels): 2
       Topic:
@@ -105,24 +105,34 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /exo_rtabmap/cloud_map
       Value: true
+    - Class: rviz_default_plugins/Odometry
+      Enabled: true
+      Name: ExoOdom
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /exo/odom
+      Value: true
     - Alpha: 0.7
       Class: rviz_default_plugins/Map
       Color Scheme: map
       Draw Backend: ogre
-      Enabled: true
-      Name: RtabmapGrid
+      Enabled: false
+      Name: NvbloxCostmap
       Topic:
         Depth: 5
         Durability Policy: Transient Local
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /map
+        Value: /nvblox/costmap
       Update Interval: 1
       Use Timestamp: false
       Value: true
     - Class: rviz_default_plugins/PointCloud2
       Color Transformer: RGB8
-      Enabled: true
+      Enabled: false
       Name: NvbloxCloud
       Size (Pixels): 3
       Topic:
@@ -133,7 +143,7 @@ Visualization Manager:
         Value: /nvblox/pointcloud
       Value: true
     - Class: rviz_default_plugins/Marker
-      Enabled: true
+      Enabled: false
       Name: NvbloxMesh
       Topic:
         Depth: 5
@@ -144,7 +154,7 @@ Visualization Manager:
       Value: true
   Global Options:
     Background Color: 48; 48; 48
-    Fixed Frame: map
+    Fixed Frame: odom
     Frame Rate: 30
   Name: root
   Tools:

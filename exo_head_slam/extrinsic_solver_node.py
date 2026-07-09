@@ -40,6 +40,7 @@ class ExtrinsicSolverNode(Node):
         self.declare_parameter('min_inlier_ratio', 0.3)
         self.declare_parameter('max_trans_jump', 0.3)
         self.declare_parameter('max_rot_jump', 0.5)
+        self.declare_parameter('connect_uninitialized_tf', True)
         
         # Evaluation metrics parameters
         self.declare_parameter('metrics_enabled', False)
@@ -65,6 +66,7 @@ class ExtrinsicSolverNode(Node):
         self.min_inlier_ratio = float(self.get_parameter('min_inlier_ratio').value)
         self.max_trans_jump = float(self.get_parameter('max_trans_jump').value)
         self.max_rot_jump = float(self.get_parameter('max_rot_jump').value)
+        self.connect_uninitialized_tf = bool(self.get_parameter('connect_uninitialized_tf').value)
         self.last_solver_time: Optional[float] = None
         
         # Metrics configuration
@@ -317,6 +319,8 @@ class ExtrinsicSolverNode(Node):
         # with the current timestamp to keep the TF tree active even when solver fails or is throttled.
         if self.current_t is not None:
             self.broadcast_transform(e_rgb.header.stamp)
+        elif self.connect_uninitialized_tf:
+            self.broadcast_startup_transform(e_rgb.header.stamp)
 
     def broadcast_transform(self, stamp):
         if self.current_t is None or self.current_q is None:
@@ -336,6 +340,15 @@ class ExtrinsicSolverNode(Node):
         t_msg.transform.rotation.z = float(self.current_q[2])
         t_msg.transform.rotation.w = float(self.current_q[3])
         
+        self.tf_broadcaster.sendTransform(t_msg)
+
+    def broadcast_startup_transform(self, stamp):
+        # ponytail: temporary identity keeps RViz/debug clouds connected until the solver has a real extrinsic.
+        t_msg = TransformStamped()
+        t_msg.header.stamp = stamp
+        t_msg.header.frame_id = self.exo_frame_id
+        t_msg.child_frame_id = self.head_frame_id
+        t_msg.transform.rotation.w = 1.0
         self.tf_broadcaster.sendTransform(t_msg)
 
     def log_metrics(self, timestamp: float, num_2d: int, num_3d: int, inliers: int, ratio: float, rmse: float, status: str):

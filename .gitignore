@@ -34,6 +34,9 @@ env/
 *.pt
 *.engine
 
+# Source-built third-party SLAM deps
+third_party/
+
 data
 
 *.png

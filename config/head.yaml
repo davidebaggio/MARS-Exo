@@ -39,7 +39,7 @@ head_rtabmap:
 
 head_nvblox:
   ros__parameters:
-    global_frame: "map"
+    global_frame: "odom"
     voxel_size_m: 0.05
     max_integration_distance_m: 5.0
     mesh_update_period: 10

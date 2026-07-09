@@ -3,6 +3,7 @@ set -euo pipefail
 
 DEFAULT_BAG="data/rosbag2_2026_06_11-15_34_13/rosbag2_2026_06_11-15_34_13_0.mcap"
 BAG_PATH="${1:-$DEFAULT_BAG}"
+ORBSLAM_MODE="${ORBSLAM_MODE:-rgbd_imu}"
 
 cleanup() {
 	if [[ -n "${BAG_PID:-}" ]] && kill -0 "$BAG_PID" 2>/dev/null; then
@@ -18,6 +19,7 @@ cleanup() {
 	pkill -f 'depth_preprocessor' || true
 	pkill -f 'semantic_masker' || true
 	pkill -f 'extrinsic_solver' || true
+	pkill -f 'orbslam3_rgbd_imu' || true
 	pkill -f 'ros2 bag play' || true
 }
 
@@ -47,7 +49,7 @@ if [ -d "install/exo_head_slam/lib/exo_head_slam" ]; then
     sed -i "1s|^#!.*python.*|#!$(which python3)|" install/exo_head_slam/lib/exo_head_slam/*
 fi
 
-ros2 launch exo_head_slam main_pipeline_launch.py use_sim_time:=true publish_debug_pcl:=true global_frame:=odom &
+ros2 launch exo_head_slam main_pipeline_launch.py use_sim_time:=true publish_debug_pcl:=false global_frame:=odom slam_backend:=orbslam3 orbslam_mode:="$ORBSLAM_MODE" &
 PIPELINE_PID=$!
 
 wait_for_pipeline

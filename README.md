@@ -10,7 +10,7 @@ The pipeline has five main stages:
 
 1. Depth preprocessing for each camera stream.
 2. Semantic masking to remove dynamic objects from RGB and depth.
-3. Visual odometry / SLAM for global pose tracking.
+3. ORB-SLAM3 RGB-D(+IMU) SLAM for global pose tracking.
 4. Online extrinsic estimation between the head and exo camera frames.
 5. TSDF-based volumetric fusion of both camera streams.
 
@@ -19,7 +19,8 @@ Data flow:
 ```text
 Head RGB + depth -> depth_preprocessor -> semantic_masker ---------.
                                                                    |
-Exo RGB + depth  -> depth_preprocessor -> semantic_masker -> VO/SLAM -> TF tree
+Exo RGB + depth  -> depth_preprocessor -> semantic_masker -> ORB-SLAM3 -> TF tree
+Exo IMU -----------------------------------------------------------'
                                             |                      |
                                             '-> extrinsic_solver --'
 
@@ -29,13 +30,12 @@ Masked head/exo RGB-D + TF tree -> nvblox_node -> mesh, pointcloud, costmap
 The intended TF tree is:
 
 ```text
-map -> odom -> exo_link -> head_link
-                 |            |
-                 v            v
-           exo_camera_link  head_camera_link
+odom -> exo_link
+  |
+  -> head_link
 ```
 
-`map -> odom` and `odom -> exo_link` come from the pose-tracking path. `exo_link -> head_link` is produced by the extrinsic solver. Static identity transforms connect each link frame to its camera link frame.
+`odom -> exo_link` comes from ORB-SLAM3. `exo_link -> head_link` is produced by the extrinsic solver. Static identity transforms connect each link frame to its camera link frame.
 
 ## Package Contents
 
@@ -46,7 +46,7 @@ Core ROS nodes live in `exo_head_slam/`:
 | `depth_preprocessor` | `depth_preprocessor_node.py` | Filters and republishes depth images |
 | `semantic_masker` | `semantic_masker_node.py` | Applies YOLO segmentation masks to RGB-D streams |
 | `extrinsic_solver` | `extrinsic_solver_node.py` | Estimates and broadcasts the head/exo SE(3) transform |
-| `fallback_vo` | `fallback_vo_node.py` | Python RGB-D visual odometry fallback |
+| `fallback_vo` | `fallback_vo_node.py` | Legacy Python RGB-D visual odometry fallback |
 | `pointcloud_publisher` | `pointcloud_publisher_node.py` | Optional debug `PointCloud2` publisher |
 | `nvblox_node` | `nvblox_node.py` | Integrates both RGB-D streams into a TSDF map |
 
@@ -55,6 +55,7 @@ Launch files:
 | File | Purpose |
 |---|---|
 | `launch/main_pipeline_launch.py` | Top-level pipeline launch |
+| `launch/orbslam3_exo_launch.py` | Exo ORB-SLAM3 RGB-D(+IMU) launch |
 | `launch/rtabmap_agents_launch.py` | Exo visual odometry + RTAB-Map SLAM launch |
 | `launch/nvblox_fusion_launch.py` | Unified nvblox fusion launch |
 
@@ -65,6 +66,8 @@ Configuration files:
 | `config/head.yaml` | Head camera topics and per-node parameters |
 | `config/exo.yaml` | Exo camera topics and per-node parameters |
 | `config/common.yaml` | Shared extrinsic solver parameters |
+| `config/orbslam3_exo.yaml` | ORB-SLAM3 wrapper topics, frames, and IMU config |
+| `config/orbslam3_exo_settings.yaml` | ORB-SLAM3 camera/IMU settings template |
 
 ## Requirements
 
@@ -88,7 +91,8 @@ Optional runtime dependencies:
 
 - `ultralytics` for YOLOv8 segmentation. If unavailable, the semantic masker publishes unmasked images.
 - `lightglue` and SuperPoint dependencies for feature matching. If unavailable, matching falls back to ORB.
-- `rtabmap_slam` for RTAB-Map SLAM. If unavailable, the top-level launch skips RTAB-Map.
+- `ORB_SLAM3` source build for the default SLAM backend. If unavailable, the wrapper builds as a stub that exits with setup instructions.
+- `rtabmap_slam` for the legacy RTAB-Map backend.
 - `nvblox_torch` for TSDF fusion.
 
 Model files such as `yolov8n-seg.pt` are not tracked in git. Place them in the repository root or update `masker.model_path` in the YAML configuration.
@@ -105,7 +109,7 @@ source install/setup.bash
 Equivalent manual build:
 
 ```bash
-colcon build --packages-select exo_head_slam --symlink-install
+colcon build --base-paths . ros2_wrappers/orbslam3_ros2 --symlink-install
 source install/setup.bash
 ```
 
@@ -115,6 +119,17 @@ If using conda or a virtual environment, the generated ROS shim scripts may hard
 find install/exo_head_slam/lib/exo_head_slam -type f -executable \
   -exec sed -i "1s|^#!.*python.*|#!$(which python3)|" {} \;
 ```
+
+Build ORB-SLAM3 without sudo:
+
+```bash
+./scripts/build_orbslam3_from_source.sh
+export ORB_SLAM3_ROOT="$PWD/third_party/ORB_SLAM3"
+export CMAKE_PREFIX_PATH="$PWD/third_party/install:${CMAKE_PREFIX_PATH:-}"
+make build
+```
+
+The script builds Pangolin locally under `third_party/install`, then builds ORB-SLAM3. If native OpenGL/X11 development headers are missing from the machine, the source build may still fail; no sudo install is attempted.
 
 ## Run
 
@@ -130,8 +145,13 @@ Common launch arguments:
 ros2 launch exo_head_slam main_pipeline_launch.py \
   use_sim_time:=true \
   publish_debug_pcl:=true \
-  global_frame:=odom
+  global_frame:=odom \
+  slam_backend:=orbslam3 \
+  orbslam_mode:=rgbd_imu \
+  enable_nvblox:=false
 ```
+
+Use `orbslam_mode:=rgbd` only for bags without IMU. The included repo-local bags publish `/camera/exo/imu`, so `run.sh` defaults to `rgbd_imu`.
 
 Use `run.sh` to build, source the workspace, launch the pipeline, play a rosbag, and start RViz:
 
@@ -162,6 +182,7 @@ Exo camera:
 - `/camera/exo/color/image_raw`
 - `/camera/exo/aligned_depth_to_color/image_raw`
 - `/camera/exo/color/camera_info`
+- `/camera/exo/imu` for ORB-SLAM3 `rgbd_imu` mode
 
 Depth images are expected to be aligned to the color camera. Camera info must match the RGB-D stream used by each node.
 
@@ -201,6 +222,7 @@ Most runtime behavior is controlled through YAML:
 - Change depth filtering parameters under `depth_filter.*`.
 - Change YOLO model path, confidence threshold, and dynamic classes under `masker.*`.
 - Change feature matching and extrinsic solver thresholds in `config/common.yaml`.
+- Change ORB-SLAM3 topic, frame, vocabulary, and IMU settings in `config/orbslam3_exo.yaml`.
 - Change voxel size, integration distance, mesh update period, and costmap settings under `head_nvblox` / `exo_nvblox`.
 
 The top-level launch loads the YAML files from the installed package share directory. Rebuild after changing configuration files:
@@ -226,9 +248,15 @@ The extrinsic solver synchronizes the head and exo masked RGB-D streams, matches
 
 It can also write extrinsic metrics to CSV when `metrics_enabled` is true.
 
+### ORB-SLAM3 Tracking
+
+The default backend tracks the exo RGB-D stream with ORB-SLAM3 and publishes `/exo/odom` plus `odom -> exo_link`. In `rgbd_imu` mode it consumes `/camera/exo/imu`; in `rgbd` mode it runs visual-only RGB-D tracking for bags without inertial data.
+
+The wrapper package is built by `make build`. Without `ORB_SLAM3_ROOT`, it builds a stub executable so the workspace still compiles and the runtime error points at the missing source build.
+
 ### Fallback Visual Odometry
 
-The fallback VO node estimates frame-to-frame RGB-D motion from the exo stream using the configured matcher and publishes odometry and optionally TF. RTAB-Map consumes this odometry when `rtabmap_slam` is installed.
+The fallback VO node estimates frame-to-frame RGB-D motion from the exo stream using the configured matcher and publishes odometry and optionally TF. It is legacy/debug only in this branch.
 
 ### NVBlox Fusion
 

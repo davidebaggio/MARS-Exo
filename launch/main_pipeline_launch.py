@@ -4,7 +4,7 @@ from launch.actions import LogInfo
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
-from launch.substitutions import PathJoinSubstitution, LaunchConfiguration
+from launch.substitutions import PathJoinSubstitution, LaunchConfiguration, PythonExpression
 from launch_ros.substitutions import FindPackageShare
 from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
@@ -31,10 +31,38 @@ def generate_launch_description():
 
     global_frame_arg = DeclareLaunchArgument(
         'global_frame',
-        default_value='map',
+        default_value='odom',
         description='Global frame for point clouds and rviz (e.g., map or odom)'
     )
     global_frame = LaunchConfiguration('global_frame')
+
+    slam_backend_arg = DeclareLaunchArgument(
+        'slam_backend',
+        default_value='orbslam3',
+        description='SLAM backend: orbslam3, rtabmap, or none'
+    )
+    slam_backend = LaunchConfiguration('slam_backend')
+
+    orbslam_mode_arg = DeclareLaunchArgument(
+        'orbslam_mode',
+        default_value='rgbd_imu',
+        description='ORB-SLAM3 mode: rgbd_imu or rgbd'
+    )
+    orbslam_mode = LaunchConfiguration('orbslam_mode')
+
+    enable_nvblox_arg = DeclareLaunchArgument(
+        'enable_nvblox',
+        default_value='false',
+        description='Enable nvblox TSDF fusion'
+    )
+    enable_nvblox = LaunchConfiguration('enable_nvblox')
+
+    enable_extrinsic_arg = DeclareLaunchArgument(
+        'enable_extrinsic',
+        default_value='true',
+        description='Enable dynamic exo_link -> head_link extrinsic solver'
+    )
+    enable_extrinsic = LaunchConfiguration('enable_extrinsic')
 
     common_params = {'use_sim_time': use_sim_time}
 
@@ -74,6 +102,7 @@ def generate_launch_description():
         executable='extrinsic_solver',
         name='extrinsic_solver',
         parameters=[common_config, exo_config, common_params],
+        condition=IfCondition(enable_extrinsic),
     )
 
     # Debug PointCloud Publishers
@@ -109,6 +138,14 @@ def generate_launch_description():
         condition=IfCondition(publish_debug_pcl)
     )
 
+    # Static TFs to keep RViz connected before tracking publishes dynamic poses.
+    static_tf_odom = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='static_tf_world_odom',
+        arguments=['0', '0', '0', '0', '0', '0', 'world', 'odom']
+    )
+
     # Static TFs to fix disjoint camera frames
     static_tf_exo = Node(
         package='tf2_ros',
@@ -128,6 +165,11 @@ def generate_launch_description():
         use_sim_time_arg,
         publish_debug_pcl_arg,
         global_frame_arg,
+        slam_backend_arg,
+        orbslam_mode_arg,
+        enable_nvblox_arg,
+        enable_extrinsic_arg,
+        static_tf_odom,
         static_tf_exo,
         static_tf_head,
         head_depth_preprocessor,
@@ -147,10 +189,24 @@ def generate_launch_description():
                     PathJoinSubstitution([pkg_share, 'launch', 'rtabmap_agents_launch.py'])
                 ),
                 launch_arguments={'use_sim_time': use_sim_time}.items(),
+                condition=IfCondition(PythonExpression(["'", slam_backend, "' == 'rtabmap'"])),
             )
         )
     except PackageNotFoundError:
         actions.append(LogInfo(msg='rtabmap_slam not found, skipping RTAB-Map launch.'))
+
+    actions.append(
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                PathJoinSubstitution([pkg_share, 'launch', 'orbslam3_exo_launch.py'])
+            ),
+            launch_arguments={
+                'use_sim_time': use_sim_time,
+                'orbslam_mode': orbslam_mode,
+            }.items(),
+            condition=IfCondition(PythonExpression(["'", slam_backend, "' == 'orbslam3'"])),
+        )
+    )
 
     actions.append(
         IncludeLaunchDescription(
@@ -161,6 +217,7 @@ def generate_launch_description():
                 'use_sim_time': use_sim_time,
                 'global_frame': global_frame
             }.items(),
+            condition=IfCondition(enable_nvblox),
         )
     )
 
