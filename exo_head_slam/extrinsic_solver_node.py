@@ -63,6 +63,8 @@ class ExtrinsicSolverNode(Node):
         self.declare_parameter('depth_conf_absolute', 1.5)            # conf threshold when mode=absolute
         self.declare_parameter('conf_gate_combine', True)              # gate raw+VGGT depth combine
         self.declare_parameter('conf_filter_pointcloud', True)        # percentile filter /vggt/combined_pointcloud
+        self.declare_parameter('pcl_require_raw_support', False)      # require raw depth for VGGT cloud pixels
+        self.declare_parameter('pcl_max_depth_residual', 0.25)         # drop raw pixels where VGGT disagrees too much
 
         self.declare_parameter('metrics_enabled', False)
         self.declare_parameter('metrics_csv_path', 'extrinsic_metrics.csv')
@@ -87,6 +89,8 @@ class ExtrinsicSolverNode(Node):
         self.depth_conf_absolute = float(self.get_parameter('depth_conf_absolute').value)
         self.conf_gate_combine = bool(self.get_parameter('conf_gate_combine').value)
         self.conf_filter_pointcloud = bool(self.get_parameter('conf_filter_pointcloud').value)
+        self.pcl_require_raw_support = bool(self.get_parameter('pcl_require_raw_support').value)
+        self.pcl_max_depth_residual = float(self.get_parameter('pcl_max_depth_residual').value)
 
         self.metrics_enabled = self.get_parameter('metrics_enabled').value
         self.metrics_csv_path = self.get_parameter('metrics_csv_path').value
@@ -180,6 +184,12 @@ class ExtrinsicSolverNode(Node):
         arr_orig = cv2.resize(arr_resized, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
         return arr_orig
 
+    def preprocess_depth_map(self, depth_arr, new_height, crop_y, target_size=512):
+        depth_resized = cv2.resize(depth_arr, (target_size, new_height), interpolation=cv2.INTER_NEAREST)
+        if new_height > target_size:
+            return depth_resized[crop_y : crop_y + target_size, :]
+        return depth_resized
+
     def blend_depth(self, raw_depth, pred_depth, raw_valid, conf_mask):
         use_vggt = ~raw_valid
         if self.conf_gate_combine:
@@ -209,37 +219,22 @@ class ExtrinsicSolverNode(Node):
     def _conf_mask(self, conf_np: np.ndarray) -> np.ndarray:
         return conf_np >= self._conf_threshold(conf_np)
 
-    def unproject_depth_map_to_point_map(self, depth_map: torch.Tensor, extrinsic: torch.Tensor, intrinsic: torch.Tensor) -> np.ndarray:
-        depth = depth_map.detach().float().cpu().numpy()[..., 0]
-        extrinsic = extrinsic.detach().float().cpu().numpy()
-        intrinsic = intrinsic.detach().float().cpu().numpy()
-        num_frames, height, width = depth.shape
-
+    def unproject_depth_np(self, depth, extrinsic, intrinsic):
+        height, width = depth.shape
         y, x = np.meshgrid(np.arange(height), np.arange(width), indexing="ij")
-        x = np.broadcast_to(x[None], (num_frames, height, width))
-        y = np.broadcast_to(y[None], (num_frames, height, width))
-
-        fx = intrinsic[:, 0, 0][:, None, None]
-        fy = intrinsic[:, 1, 1][:, None, None]
-        cx = intrinsic[:, 0, 2][:, None, None]
-        cy = intrinsic[:, 1, 2][:, None, None]
 
         camera_points = np.stack(
             [
-                (x - cx) / fx * depth,
-                (y - cy) / fy * depth,
+                (x - intrinsic[0, 2]) / intrinsic[0, 0] * depth,
+                (y - intrinsic[1, 2]) / intrinsic[1, 1] * depth,
                 depth,
             ],
             axis=-1,
         )
 
-        rotation = extrinsic[:, :3, :3]
-        translation = extrinsic[:, :3, 3]
-        return np.einsum(
-            "sij,shwj->shwi",
-            np.transpose(rotation, (0, 2, 1)),
-            camera_points - translation[:, None, None, :],
-        )
+        rotation = extrinsic[:3, :3]
+        translation = extrinsic[:3, 3]
+        return np.einsum("ij,hwj->hwi", rotation.T, camera_points - translation)
 
     def solve_callback(self, h_rgb: Image, h_depth: Image, e_rgb: Image, e_depth: Image):
         from scipy.spatial.transform import Rotation as R
@@ -281,11 +276,6 @@ class ExtrinsicSolverNode(Node):
                     extrinsic, intrinsic = encoding_to_camera(predictions["pose_enc"], predictions["images"].shape[-2:])
                     depth_map = predictions["depth"]
                     depth_conf = predictions["depth_conf"]
-                    point_map_by_unprojection = self.unproject_depth_map_to_point_map(
-                        depth_map.squeeze(0).float(),
-                        extrinsic.squeeze(0).float(),
-                        intrinsic.squeeze(0).float()
-                    )
 
                 E_head = extrinsic[0, 2 * M - 2].cpu().float().numpy()
                 E_exo = extrinsic[0, 2 * M - 1].cpu().float().numpy()
@@ -296,8 +286,7 @@ class ExtrinsicSolverNode(Node):
                 e_conf = depth_conf[0, 2 * M - 1].cpu().float().numpy()
 
                 self.get_logger().info(
-                    f"VGGT-Omega: depth_map={depth_map.shape} depth_conf={depth_conf.shape} "
-                    f"point_map={point_map_by_unprojection.shape}"
+                    f"VGGT-Omega: depth_map={depth_map.shape} depth_conf={depth_conf.shape}"
                 )
 
                 # Postprocess depth maps back to original dimensions
@@ -373,14 +362,18 @@ class ExtrinsicSolverNode(Node):
                         float(np.percentile(e_conf_orig, 95)),
                     )
 
-                # Publish VGGT Point Cloud map (conf-filtered if enabled)
-                h_pts = point_map_by_unprojection[2 * M - 2]
-                e_pts = point_map_by_unprojection[2 * M - 1]
+                # Publish VGGT world geometry, using raw depth only to reject bad pixels.
+                h_raw_model = self.preprocess_depth_map(head_dep, h_new_h, h_crop_y)
+                e_raw_model = self.preprocess_depth_map(exo_dep, e_new_h, e_crop_y)
                 h_color = (h_tensor.permute(1, 2, 0).cpu().numpy() * 255.0).astype(np.uint8)
                 e_color = (e_tensor.permute(1, 2, 0).cpu().numpy() * 255.0).astype(np.uint8)
                 self.publish_vggt_pointcloud(
-                    h_pts, e_pts, h_color, e_color,
-                    h_pred_depth, e_pred_depth, h_conf, e_conf, scale, e_rgb.header.stamp
+                    h_raw_model, e_raw_model, h_color, e_color,
+                    h_pred_depth, e_pred_depth, h_conf, e_conf,
+                    E_head_scaled, E_exo_scaled,
+                    intrinsic[0, 2 * M - 2].cpu().float().numpy(),
+                    intrinsic[0, 2 * M - 1].cpu().float().numpy(),
+                    scale, e_rgb.header.stamp
                 )
 
                 # Compute relative extrinsic camera pose (in optical frames)
@@ -515,25 +508,39 @@ class ExtrinsicSolverNode(Node):
         if self.device == "cuda":
             torch.cuda.empty_cache()
 
-    def publish_vggt_pointcloud(self, h_pts, e_pts, h_color, e_color,
-                                h_pred_depth, e_pred_depth, h_conf, e_conf, scale, stamp):
+    def publish_vggt_pointcloud(self, h_raw_depth, e_raw_depth, h_color, e_color,
+                                h_pred_depth, e_pred_depth, h_conf, e_conf,
+                                h_extrinsic, e_extrinsic, h_intrinsic, e_intrinsic,
+                                scale, stamp):
         h_depth_scaled = h_pred_depth * scale
         e_depth_scaled = e_pred_depth * scale
         h_conf_mask = self._conf_mask(h_conf)
         e_conf_mask = self._conf_mask(e_conf)
-        h_pts_metric = h_pts * scale
-        e_pts_metric = e_pts * scale
+
+        h_raw_valid = (h_raw_depth > 0.1) & (h_raw_depth < 10.0) & np.isfinite(h_raw_depth)
+        e_raw_valid = (e_raw_depth > 0.1) & (e_raw_depth < 10.0) & np.isfinite(e_raw_depth)
 
         h_valid = (h_depth_scaled > 0.1) & (h_depth_scaled < 6.0)
         e_valid = (e_depth_scaled > 0.1) & (e_depth_scaled < 6.0)
+
+        if self.pcl_require_raw_support:
+            h_valid = h_valid & h_raw_valid
+            e_valid = e_valid & e_raw_valid
 
         if self.conf_filter_pointcloud:
             h_valid = h_valid & h_conf_mask
             e_valid = e_valid & e_conf_mask
 
-        h_pts_valid = h_pts_metric[h_valid]
+        if self.pcl_max_depth_residual > 0.0:
+            h_valid = h_valid & (~h_raw_valid | (np.abs(h_depth_scaled - h_raw_depth) <= self.pcl_max_depth_residual))
+            e_valid = e_valid & (~e_raw_valid | (np.abs(e_depth_scaled - e_raw_depth) <= self.pcl_max_depth_residual))
+
+        h_pts = self.unproject_depth_np(h_depth_scaled, h_extrinsic, h_intrinsic)
+        e_pts = self.unproject_depth_np(e_depth_scaled, e_extrinsic, e_intrinsic)
+
+        h_pts_valid = h_pts[h_valid]
         h_color_valid = h_color[h_valid]
-        e_pts_valid = e_pts_metric[e_valid]
+        e_pts_valid = e_pts[e_valid]
         e_color_valid = e_color[e_valid]
 
         if len(h_pts_valid) == 0 and len(e_pts_valid) == 0:
