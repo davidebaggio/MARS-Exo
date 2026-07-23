@@ -140,6 +140,14 @@ Run against a specific bag:
 
 `run.sh` builds the package, sources the workspace, fixes Python shebangs, starts the pipeline, plays the bag with `/clock`, writes metrics under `metrics/pipeline/`, and opens `rviz/pipeline.rviz`.
 
+When the bag contains `/ground_truth/global_map`, `run.sh` automatically enables
+the simulated exoskeleton dataset profile: metric `32FC1` depth, isolated GT TF
+topics, one-shot playback, extrinsic GT metrics, and trajectory/map evaluation.
+Benchmark JSON and paired trajectory CSV files are written under `metrics/eval/`.
+RViz also shows `/ground_truth/global_map` in green, aligned to the estimated
+map at the first GT camera pose. GT odometry and a conflict-free `gt_*` TF tree
+are enabled; visible cloud/map displays are available disabled.
+
 ## Topics
 
 Default inputs:
@@ -217,6 +225,7 @@ Run the minimal depth-blending self-check directly:
 
 ```bash
 python tests/test_depth_blend.py
+python tests/test_benchmark_evaluator.py
 ```
 
 ## Troubleshooting

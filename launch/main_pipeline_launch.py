@@ -3,6 +3,7 @@ from launch.actions import IncludeLaunchDescription
 from launch.actions import LogInfo
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
 from launch.substitutions import PathJoinSubstitution, LaunchConfiguration
 from launch_ros.substitutions import FindPackageShare
@@ -22,6 +23,20 @@ def generate_launch_description():
     )
     use_sim_time = LaunchConfiguration('use_sim_time')
 
+    dataset_mode_arg = DeclareLaunchArgument(
+        'dataset_mode',
+        default_value='false',
+        description='Enable exoskeleton_dataset frame isolation and evaluation'
+    )
+    dataset_mode = LaunchConfiguration('dataset_mode')
+
+    depth_unit_scale_arg = DeclareLaunchArgument(
+        'depth_unit_scale',
+        default_value='0.001',
+        description='Scale applied to incoming depth values'
+    )
+    depth_unit_scale = LaunchConfiguration('depth_unit_scale')
+
     publish_debug_pcl_arg = DeclareLaunchArgument(
         'publish_debug_pcl',
         default_value='true',
@@ -35,6 +50,26 @@ def generate_launch_description():
         description='Path to the metrics CSV file'
     )
     metrics_csv_path = LaunchConfiguration('metrics_csv_path')
+
+    gt_parent_frame_arg = DeclareLaunchArgument('gt_parent_frame', default_value='')
+    gt_parent_frame = LaunchConfiguration('gt_parent_frame')
+    gt_child_frame_arg = DeclareLaunchArgument('gt_child_frame', default_value='')
+    gt_child_frame = LaunchConfiguration('gt_child_frame')
+    gt_tf_static_topic_arg = DeclareLaunchArgument('gt_tf_static_topic', default_value='')
+    gt_tf_static_topic = LaunchConfiguration('gt_tf_static_topic')
+
+    evaluation_enabled_arg = DeclareLaunchArgument(
+        'evaluation_enabled',
+        default_value='false',
+        description='Run trajectory and map benchmark evaluator'
+    )
+    evaluation_enabled = LaunchConfiguration('evaluation_enabled')
+    benchmark_output_prefix_arg = DeclareLaunchArgument(
+        'benchmark_output_prefix',
+        default_value='metrics/eval/benchmark',
+        description='Benchmark output path without extension'
+    )
+    benchmark_output_prefix = LaunchConfiguration('benchmark_output_prefix')
 
     use_imu_arg = DeclareLaunchArgument(
         'use_imu',
@@ -70,14 +105,20 @@ def generate_launch_description():
         package='exo_head_slam',
         executable='depth_preprocessor',
         name='head_depth_preprocessor',
-        parameters=[head_config, common_params],
+        parameters=[
+            head_config, common_params,
+            {'depth_filter.depth_unit_scale': depth_unit_scale},
+        ],
     )
 
     exo_depth_preprocessor = Node(
         package='exo_head_slam',
         executable='depth_preprocessor',
         name='exo_depth_preprocessor',
-        parameters=[exo_config, common_params],
+        parameters=[
+            exo_config, common_params,
+            {'depth_filter.depth_unit_scale': depth_unit_scale},
+        ],
     )
     
     # Head Masker
@@ -101,7 +142,17 @@ def generate_launch_description():
         package='exo_head_slam',
         executable='extrinsic_solver',
         name='extrinsic_solver',
-        parameters=[common_config, exo_config, common_params, {'metrics_csv_path': metrics_csv_path}],
+        parameters=[
+            common_config,
+            exo_config,
+            common_params,
+            {
+                'metrics_csv_path': metrics_csv_path,
+                'gt_parent_frame': gt_parent_frame,
+                'gt_child_frame': gt_child_frame,
+                'gt_tf_static_topic': gt_tf_static_topic,
+            },
+        ],
     )
 
     # Debug PointCloud Publishers
@@ -135,12 +186,71 @@ def generate_launch_description():
         condition=IfCondition(publish_debug_pcl)
     )
 
+    dataset_static_transforms = [
+        Node(
+            package='tf2_ros',
+            executable='static_transform_publisher',
+            name='dataset_exo_optical_tf',
+            arguments=[
+                '--x', '0', '--y', '0', '--z', '0',
+                '--qx', '0.5', '--qy', '-0.5', '--qz', '0.5', '--qw', '-0.5',
+                '--frame-id', 'exo_link',
+                '--child-frame-id', 'front_camera_color_optical_frame',
+            ],
+            condition=IfCondition(dataset_mode),
+        ),
+        Node(
+            package='tf2_ros',
+            executable='static_transform_publisher',
+            name='dataset_exo_imu_tf',
+            arguments=[
+                '--frame-id', 'exo_link',
+                '--child-frame-id', 'front_camera_imu_frame',
+            ],
+            condition=IfCondition(dataset_mode),
+        ),
+        Node(
+            package='tf2_ros',
+            executable='static_transform_publisher',
+            name='dataset_head_optical_tf',
+            arguments=[
+                '--x', '0', '--y', '0', '--z', '0',
+                '--qx', '0.5', '--qy', '-0.5', '--qz', '0.5', '--qw', '-0.5',
+                '--frame-id', 'head_link',
+                '--child-frame-id', 'head_camera_color_optical_frame',
+            ],
+            condition=IfCondition(dataset_mode),
+        ),
+    ]
+
+    benchmark_evaluator = Node(
+        package='exo_head_slam',
+        executable='benchmark_evaluator',
+        name='benchmark_evaluator',
+        parameters=[
+            common_params,
+            {
+                'output_prefix': benchmark_output_prefix,
+                'map_start_z': ParameterValue(map_start_z, value_type=float),
+            },
+        ],
+        condition=IfCondition(evaluation_enabled),
+        output='screen',
+    )
+
     # Start RTAB-Map early so it initializes before data flows (service ready
     # by the time map_assembler fires after its 5s TimerAction delay).
     actions = [
         use_sim_time_arg,
+        dataset_mode_arg,
+        depth_unit_scale_arg,
         publish_debug_pcl_arg,
         metrics_csv_path_arg,
+        gt_parent_frame_arg,
+        gt_child_frame_arg,
+        gt_tf_static_topic_arg,
+        evaluation_enabled_arg,
+        benchmark_output_prefix_arg,
         use_imu_arg,
         imu_topic_arg,
         filtered_imu_topic_arg,
@@ -175,6 +285,8 @@ def generate_launch_description():
         extrinsic_solver,
         head_pcl_pub,
         exo_pcl_pub,
+        *dataset_static_transforms,
+        benchmark_evaluator,
     ])
 
     return LaunchDescription(actions)

@@ -11,6 +11,7 @@ import tf2_ros
 from rclpy.node import Node
 from sensor_msgs.msg import Image, PointCloud2, PointField
 from geometry_msgs.msg import TransformStamped
+from tf2_msgs.msg import TFMessage
 from cv_bridge import CvBridge
 
 # Locate vggt-omega directory dynamically
@@ -70,6 +71,7 @@ class ExtrinsicSolverNode(Node):
         self.declare_parameter('metrics_csv_path', 'extrinsic_metrics.csv')
         self.declare_parameter('gt_parent_frame', '')
         self.declare_parameter('gt_child_frame', '')
+        self.declare_parameter('gt_tf_static_topic', '')
 
         # Get values
         self.head_rgb_topic = self.get_parameter('head_rgb_topic').value
@@ -96,11 +98,33 @@ class ExtrinsicSolverNode(Node):
         self.metrics_csv_path = self.get_parameter('metrics_csv_path').value
         self.gt_parent_frame = self.get_parameter('gt_parent_frame').value
         self.gt_child_frame = self.get_parameter('gt_child_frame').value
+        self.gt_tf_static_topic = self.get_parameter('gt_tf_static_topic').value
 
         self.bridge = CvBridge()
         self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        self.gt_tf_buffer = None
+        self.gt_tf_static_sub = None
+        if self.gt_tf_static_topic:
+            from rclpy.qos import (
+                DurabilityPolicy,
+                HistoryPolicy,
+                QoSProfile,
+                ReliabilityPolicy,
+            )
+            self.gt_tf_buffer = tf2_ros.Buffer()
+            self.gt_tf_static_sub = self.create_subscription(
+                TFMessage,
+                self.gt_tf_static_topic,
+                self._ingest_gt_static_tf,
+                QoSProfile(
+                    reliability=ReliabilityPolicy.RELIABLE,
+                    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                    history=HistoryPolicy.KEEP_LAST,
+                    depth=1,
+                ),
+            )
 
         # State
         self.current_t = np.array([-0.3, 0.0, 0.5])
@@ -209,6 +233,10 @@ class ExtrinsicSolverNode(Node):
         mat[:3, 3] = [tf.transform.translation.x, tf.transform.translation.y,
                       tf.transform.translation.z]
         return mat
+
+    def _ingest_gt_static_tf(self, msg: TFMessage):
+        for transform in msg.transforms:
+            self.gt_tf_buffer.set_transform_static(transform, 'ground_truth_bag')
 
     def _conf_threshold(self, conf_np: np.ndarray) -> float:
         if self.depth_conf_mode == "absolute":
@@ -657,7 +685,8 @@ class ExtrinsicSolverNode(Node):
 
         if self.gt_parent_frame and self.gt_child_frame and new_t is not None and new_q is not None:
             try:
-                gt_tf = self.tf_buffer.lookup_transform(
+                gt_buffer = self.gt_tf_buffer or self.tf_buffer
+                gt_tf = gt_buffer.lookup_transform(
                     self.gt_parent_frame, self.gt_child_frame, rclpy.time.Time()
                 )
                 gt_mat = self.tf_to_matrix(gt_tf)
