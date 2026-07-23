@@ -30,6 +30,7 @@ setup(
             'extrinsic_solver = exo_head_slam.extrinsic_solver_node:main',
             'pointcloud_publisher = exo_head_slam.pointcloud_publisher_node:main',
             'dense_global_map = exo_head_slam.dense_global_map_node:main',
+            'benchmark_evaluator = exo_head_slam.benchmark_evaluator_node:main',
         ],
     },
 )

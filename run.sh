@@ -6,6 +6,8 @@ rm -f ~/.ros/*.db
 #DEFAULT_BAG="data/rosbag2_2026_06_11-15_25_14/rosbag2_2026_06_11-15_25_14_0.mcap"
 #DEFAULT_BAG="data/rosbag2_2026_06_11-15_31_00/rosbag2_2026_06_11-15_31_00_0.mcap"
 DEFAULT_BAG="data/rosbag2_2026_06_11-15_34_13/rosbag2_2026_06_11-15_34_13_0.mcap"
+
+#DEFAULT_BAG="data/exoskeleton_dataset/exoskeleton_dataset_0.mcap"
 BAG_PATH="${1:-$DEFAULT_BAG}"
 
 cleanup() {
@@ -53,29 +55,88 @@ if [ -d "install/exo_head_slam/lib/exo_head_slam" ]; then
     sed -i "1s|^#!.*python.*|#!$(which python3)|" install/exo_head_slam/lib/exo_head_slam/*
 fi
 
-ros2 launch exo_head_slam main_pipeline_launch.py \
-	use_sim_time:=true \
-	publish_debug_pcl:=true \
-	imu_topic:=/camera/exo/imu \
-	orbslam3_vocabulary_path:=third_party/ORB_SLAM3/Vocabulary/ORBvoc.txt \
-	orbslam3_settings_path:=config/orbslam3_exo.yaml \
-	map_start_z:=1 \
-	dense_map_voxel_size:=0.03 \
-	dense_map_max_points:=250000 \
-	dense_map_downsample_factor:=2 \
-	dense_map_min_depth:=0.1 \
-	dense_map_max_depth:=10.0 &
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+mkdir -p metrics/pipeline
+METRICS_CSV="metrics/pipeline/metrics_${TIMESTAMP}.csv"
+BENCHMARK_PREFIX="metrics/eval/benchmark_${TIMESTAMP}"
+echo "Logging metrics to: $METRICS_CSV"
+
+BAG_INFO="$(ros2 bag info "$BAG_PATH" 2>/dev/null)"
+SLAM_MODE=RGBD
+if grep -q 'Topic: /camera/exo/imu | Type: sensor_msgs/msg/Imu' <<<"$BAG_INFO"; then
+	SLAM_MODE=IMU_RGBD
+fi
+echo "ORB-SLAM3 mode: $SLAM_MODE"
+
+DATASET_MODE=false
+DEPTH_UNIT_SCALE=0.001
+EVALUATION_ENABLED=false
+GT_PARENT_FRAME=""
+GT_CHILD_FRAME=""
+GT_TF_STATIC_TOPIC=""
+if grep -q 'Topic: /ground_truth/global_map' <<<"$BAG_INFO"; then
+	DATASET_MODE=true
+	DEPTH_UNIT_SCALE=1.0
+	EVALUATION_ENABLED=true
+	GT_PARENT_FRAME="front_camera_link"
+	GT_CHILD_FRAME="head_camera_link"
+	GT_TF_STATIC_TOPIC="/ground_truth/tf_static"
+	echo "Detected exoskeleton_dataset: enabling GT benchmark"
+fi
+
+LAUNCH_ARGS=(
+	use_sim_time:=true
+	publish_debug_pcl:=true
+	metrics_csv_path:="$METRICS_CSV"
+	benchmark_output_prefix:="$BENCHMARK_PREFIX"
+	dataset_mode:="$DATASET_MODE"
+	depth_unit_scale:="$DEPTH_UNIT_SCALE"
+	evaluation_enabled:="$EVALUATION_ENABLED"
+	imu_topic:=/camera/exo/imu
+	slam_mode:="$SLAM_MODE"
+	orbslam3_vocabulary_path:=third_party/ORB_SLAM3/Vocabulary/ORBvoc.txt
+	orbslam3_settings_path:=config/orbslam3_exo.yaml
+	map_start_z:=1
+	dense_map_voxel_size:=0.03
+	dense_map_max_points:=250000
+	dense_map_downsample_factor:=2
+	dense_map_min_depth:=0.1
+	dense_map_max_depth:=10.0
+)
+if [[ "$DATASET_MODE" == true ]]; then
+	LAUNCH_ARGS+=(
+		gt_parent_frame:="$GT_PARENT_FRAME"
+		gt_child_frame:="$GT_CHILD_FRAME"
+		gt_tf_static_topic:="$GT_TF_STATIC_TOPIC"
+	)
+fi
+ros2 launch exo_head_slam main_pipeline_launch.py "${LAUNCH_ARGS[@]}" &
 PIPELINE_PID=$!
 
 wait_for_pipeline
 
 echo "Starting bag playback: $BAG_PATH"
-ros2 bag play -i "$BAG_PATH" mcap --loop --rate 0.3 --disable-keyboard-controls --clock &
-     #--remap /tf:=/tf_old /tf_static:=/tf_static_old &
+PLAY_ARGS=(-i "$BAG_PATH" mcap --rate 0.3 --disable-keyboard-controls --clock)
+if [[ "$DATASET_MODE" == true ]]; then
+	PLAY_ARGS+=(--remap /tf:=/ground_truth/tf /tf_static:=/ground_truth/tf_static)
+else
+	PLAY_ARGS+=(--loop)
+fi
+ros2 bag play "${PLAY_ARGS[@]}" &
 BAG_PID=$!
 
 # Launch RViz with pre-configured displays
 rviz2 -d "$(ros2 pkg prefix exo_head_slam)/share/exo_head_slam/rviz/pipeline.rviz" --ros-args -p use_sim_time:=true &
 RVIZ_PID=$!
+
+if [[ "$DATASET_MODE" == true ]]; then
+	wait "$BAG_PID"
+	sleep 5
+	timeout 15 ros2 service call \
+		/benchmark_evaluator/finalize std_srvs/srv/Trigger "{}"
+	python3 plot_metrics.py "$METRICS_CSV"
+	echo "Benchmark summary: ${BENCHMARK_PREFIX}.json"
+	exit 0
+fi
 
 wait "$PIPELINE_PID"

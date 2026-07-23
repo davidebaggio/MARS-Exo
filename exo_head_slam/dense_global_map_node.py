@@ -6,7 +6,13 @@ import rclpy
 from cv_bridge import CvBridge
 from rclpy.duration import Duration
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.qos import (
+    DurabilityPolicy,
+    HistoryPolicy,
+    QoSProfile,
+    ReliabilityPolicy,
+    qos_profile_sensor_data,
+)
 from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo, Image, PointCloud2, PointField
 from tf2_ros import Buffer, TransformListener
@@ -156,9 +162,15 @@ class DenseGlobalMapNode(Node):
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self, spin_thread=True)
 
-        self.rgb_sub = message_filters.Subscriber(self, Image, self.rgb_topic)
-        self.depth_sub = message_filters.Subscriber(self, Image, self.depth_topic)
-        self.info_sub = message_filters.Subscriber(self, CameraInfo, self.camera_info_topic)
+        self.rgb_sub = message_filters.Subscriber(
+            self, Image, self.rgb_topic, qos_profile=qos_profile_sensor_data
+        )
+        self.depth_sub = message_filters.Subscriber(
+            self, Image, self.depth_topic, qos_profile=qos_profile_sensor_data
+        )
+        self.info_sub = message_filters.Subscriber(
+            self, CameraInfo, self.camera_info_topic, qos_profile=qos_profile_sensor_data
+        )
         self.sync = message_filters.ApproximateTimeSynchronizer(
             [self.rgb_sub, self.depth_sub, self.info_sub],
             queue_size=20,

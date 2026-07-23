@@ -10,6 +10,8 @@ Panels:
         - /HeadDebugCloud1
         - /ExoDebugCloud1
         - /VggtCloud1
+        - /GroundTruthGlobalMap1
+        - /GroundTruthOdometry1
       Splitter Ratio: 0.5
     Tree Height: 500
   - Class: rviz_common/Views
@@ -117,6 +119,58 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /orbslam/cloud_map
+      Value: true
+    - Alpha: 0.35
+      Class: rviz_default_plugins/PointCloud2
+      Color: 85; 255; 127
+      Color Transformer: FlatColor
+      Enabled: true
+      Name: GroundTruthGlobalMap
+      Size (Pixels): 2
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /ground_truth/global_map
+      Value: true
+    - Alpha: 0.6
+      Class: rviz_default_plugins/PointCloud2
+      Color: 255; 170; 0
+      Color Transformer: FlatColor
+      Enabled: false
+      Name: GroundTruthVisibleCloud
+      Size (Pixels): 2
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /ground_truth/visible_cloud
+      Value: false
+    - Alpha: 0.35
+      Class: rviz_default_plugins/PointCloud2
+      Color: 85; 170; 255
+      Color Transformer: FlatColor
+      Enabled: false
+      Name: GroundTruthVisibleMap
+      Size (Pixels): 2
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /ground_truth/visible_map
+      Value: false
+    - Class: rviz_default_plugins/Odometry
+      Enabled: true
+      Name: GroundTruthOdometry
+      Topic:
+        Depth: 10
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /exoskeleton/odom
       Value: true
     - Alpha: 0.7
       Class: rviz_default_plugins/Map
