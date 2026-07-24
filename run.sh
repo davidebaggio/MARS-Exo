@@ -62,11 +62,8 @@ BENCHMARK_PREFIX="metrics/eval/benchmark_${TIMESTAMP}"
 echo "Logging metrics to: $METRICS_CSV"
 
 BAG_INFO="$(ros2 bag info "$BAG_PATH" 2>/dev/null)"
-SLAM_MODE=RGBD
+SLAM_MODE="${SLAM_MODE:-RGBD}"
 ORB_SETTINGS_PATH=config/orbslam3_exo.yaml
-if grep -q 'Topic: /camera/exo/imu | Type: sensor_msgs/msg/Imu' <<<"$BAG_INFO"; then
-	SLAM_MODE=IMU_RGBD
-fi
 
 DATASET_MODE=false
 DEPTH_UNIT_SCALE=0.001
@@ -84,6 +81,7 @@ if grep -q 'Topic: /ground_truth/global_map' <<<"$BAG_INFO"; then
 	GT_CHILD_FRAME="head_camera_link"
 	GT_TF_STATIC_TOPIC="/ground_truth/tf_static"
 	echo "Detected exoskeleton_dataset: enabling GT benchmark"
+	echo "Inertial mode disabled: this dataset's ~3.5 Hz, low-excitation IMU cannot reliably initialize ORB-SLAM3"
 fi
 echo "ORB-SLAM3 mode: $SLAM_MODE"
 
@@ -119,11 +117,10 @@ PIPELINE_PID=$!
 wait_for_pipeline
 
 echo "Starting bag playback: $BAG_PATH"
-PLAY_ARGS=(-i "$BAG_PATH" mcap --rate 0.3 --disable-keyboard-controls --clock)
+BAG_RATE="${BAG_RATE:-0.3}"
+PLAY_ARGS=(-i "$BAG_PATH" mcap --rate "$BAG_RATE" --disable-keyboard-controls --clock)
 if [[ "$DATASET_MODE" == true ]]; then
 	PLAY_ARGS+=(--remap /tf:=/ground_truth/tf /tf_static:=/ground_truth/tf_static)
-else
-	PLAY_ARGS+=(--loop)
 fi
 ros2 bag play "${PLAY_ARGS[@]}" &
 BAG_PID=$!

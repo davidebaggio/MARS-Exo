@@ -38,3 +38,4 @@ venv/
 
 skills-lock.json
 *.txt
+!ros2_wrappers/orbslam3_ros2/CMakeLists.txt

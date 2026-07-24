@@ -97,14 +97,6 @@ def generate_launch_description():
         output='screen'
     )
 
-    map_to_odom_tf = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='map_to_odom_tf',
-        arguments=['--frame-id', 'map', '--child-frame-id', 'odom'],
-        output='screen'
-    )
-
     orbslam3_exo = Node(
         package='orbslam3_ros2',
         executable='orbslam3_rgbd_imu',
@@ -114,16 +106,20 @@ def generate_launch_description():
             'use_sim_time': use_sim_time,
             'vocabulary_path': orbslam3_vocabulary_path,
             'settings_path': orbslam3_settings_path,
-            'rgb_topic': '/exo/masked/image_raw',
-            'depth_topic': '/exo/masked/depth_raw',
+            'rgb_topic': '/camera/exo/color/image_raw',
+            'depth_topic': '/exo/filtered/depth_raw',
             'imu_topic': imu_topic,
             'camera_info_topic': '/camera/exo/color/camera_info',
-            'odom_frame_id': 'odom',
+            'map_frame_id': 'map',
             'base_frame_id': 'exo_link',
             'camera_frame_id': '',
             'publish_tf': True,
             'depth_scale': 1.0,
             'imu_timeout_sec': 15.0,
+            'imu_max_lag_sec': 0.02,
+            'sync_max_delta_sec': 0.02,
+            'pose_jump_translation_m': 2.0,
+            'pose_jump_rotation_rad': 1.0,
             'slam_mode': slam_mode,
         }]
     )
@@ -136,9 +132,9 @@ def generate_launch_description():
         parameters=[{
             'use_sim_time': use_sim_time,
             'rgb_topic': '/exo/masked/image_raw',
-            'depth_topic': '/exo/combined/depth_raw',
+            'depth_topic': '/exo/masked/depth_raw',
             'camera_info_topic': '/camera/exo/color/camera_info',
-            'odom_frame_id': 'odom',
+            'map_frame_id': 'map',
             'voxel_size': dense_map_voxel_size,
             'max_points': dense_map_max_points,
             'downsample_factor': dense_map_downsample_factor,
@@ -162,7 +158,6 @@ def generate_launch_description():
         dense_map_min_depth_arg,
         dense_map_max_depth_arg,
         viz_ground_to_map_tf,
-        map_to_odom_tf,
         orbslam3_exo,
         dense_global_map,
     ])

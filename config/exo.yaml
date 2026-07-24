@@ -7,7 +7,7 @@ exo_depth_preprocessor:
     depth_filter.spatial.kernel_size: 5
     depth_filter.spatial.sigma_color: 0.08
     depth_filter.spatial.sigma_space: 3.0
-    depth_filter.temporal.enabled: true
+    depth_filter.temporal.enabled: false
     depth_filter.temporal.alpha: 0.6
 
 exo_semantic_masker:

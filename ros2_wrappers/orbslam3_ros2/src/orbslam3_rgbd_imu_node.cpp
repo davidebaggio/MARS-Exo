@@ -1,5 +1,8 @@
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <cmath>
+#include <condition_variable>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -23,6 +26,7 @@
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/imu.hpp>
+#include <std_msgs/msg/u_int32.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_broadcaster.h>
 #include <tf2_ros/transform_listener.h>
@@ -117,12 +121,16 @@ public:
     declare_parameter<std::string>("depth_topic", "/exo/masked/depth_raw");
     declare_parameter<std::string>("imu_topic", "/camera/exo/imu");
     declare_parameter<std::string>("camera_info_topic", "/camera/exo/color/camera_info");
-    declare_parameter<std::string>("odom_frame_id", "odom");
+    declare_parameter<std::string>("map_frame_id", "map");
     declare_parameter<std::string>("base_frame_id", "exo_link");
     declare_parameter<std::string>("camera_frame_id", "");
     declare_parameter<bool>("publish_tf", true);
     declare_parameter<double>("depth_scale", 1.0);
     declare_parameter<double>("imu_timeout_sec", 15.0);
+    declare_parameter<double>("imu_max_lag_sec", 0.02);
+    declare_parameter<double>("sync_max_delta_sec", 0.02);
+    declare_parameter<double>("pose_jump_translation_m", 2.0);
+    declare_parameter<double>("pose_jump_rotation_rad", 1.0);
     declare_parameter<std::string>("slam_mode", "IMU_RGBD");
 
     vocabulary_path_ = get_parameter("vocabulary_path").as_string();
@@ -131,12 +139,16 @@ public:
     depth_topic_ = get_parameter("depth_topic").as_string();
     imu_topic_ = get_parameter("imu_topic").as_string();
     camera_info_topic_ = get_parameter("camera_info_topic").as_string();
-    odom_frame_id_ = get_parameter("odom_frame_id").as_string();
+    map_frame_id_ = get_parameter("map_frame_id").as_string();
     base_frame_id_ = get_parameter("base_frame_id").as_string();
     camera_frame_id_ = get_parameter("camera_frame_id").as_string();
     publish_tf_ = get_parameter("publish_tf").as_bool();
     depth_scale_ = get_parameter("depth_scale").as_double();
     imu_timeout_sec_ = get_parameter("imu_timeout_sec").as_double();
+    imu_max_lag_sec_ = get_parameter("imu_max_lag_sec").as_double();
+    sync_max_delta_sec_ = get_parameter("sync_max_delta_sec").as_double();
+    pose_jump_translation_m_ = get_parameter("pose_jump_translation_m").as_double();
+    pose_jump_rotation_rad_ = get_parameter("pose_jump_rotation_rad").as_double();
     slam_mode_ = get_parameter("slam_mode").as_string();
 
     if (vocabulary_path_.empty() || settings_path_.empty()) {
@@ -149,8 +161,7 @@ public:
       throw std::runtime_error("ORB settings not found: " + settings_path_);
     }
 
-    auto orb_settings = load_and_convert_settings(settings_path_);
-    generated_settings_path_ = write_orb_settings_file(orb_settings);
+    orb_settings_ = load_and_convert_settings(settings_path_);
 
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
     tf_buffer_->setUsingDedicatedThread(true);
@@ -159,6 +170,9 @@ public:
       get_node_parameters_interface(), get_node_topics_interface(), true);
     tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
     odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("/exo/odom", 10);
+    epoch_pub_ = create_publisher<std_msgs::msg::UInt32>(
+      "/orbslam/map_epoch", rclcpp::QoS(1).reliable().transient_local());
+    publish_epoch("startup");
 
     using ApproxPolicy = message_filters::sync_policies::ApproximateTime<
       sensor_msgs::msg::Image, sensor_msgs::msg::Image, sensor_msgs::msg::CameraInfo>;
@@ -173,21 +187,18 @@ public:
     sync_->registerCallback(
       std::bind(&Orbslam3RgbdImuNode::rgbd_callback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
 
+    imu_callback_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    rclcpp::SubscriptionOptions imu_options;
+    imu_options.callback_group = imu_callback_group_;
     imu_sub_ = create_subscription<sensor_msgs::msg::Imu>(
-      imu_topic_, rclcpp::SensorDataQoS(),
-      std::bind(&Orbslam3RgbdImuNode::imu_callback, this, std::placeholders::_1));
-
-    const auto sensor_mode = (slam_mode_ == "RGBD")
-      ? ORB_SLAM3::System::RGBD
-      : ORB_SLAM3::System::IMU_RGBD;
-    slam_ = std::make_unique<ORB_SLAM3::System>(
-      vocabulary_path_, generated_settings_path_, sensor_mode, false);
+      imu_topic_, rclcpp::SensorDataQoS().keep_last(1000),
+      std::bind(&Orbslam3RgbdImuNode::imu_callback, this, std::placeholders::_1), imu_options);
 
     startup_wall_time_ = std::chrono::steady_clock::now();
     startup_timer_ = create_wall_timer(
       std::chrono::seconds(1), std::bind(&Orbslam3RgbdImuNode::startup_watchdog, this));
 
-    RCLCPP_INFO(get_logger(), "ORB-SLAM3 %s node ready", slam_mode_.c_str());
+    RCLCPP_INFO(get_logger(), "ORB-SLAM3 %s wrapper ready; waiting for live calibration", slam_mode_.c_str());
   }
 
   ~Orbslam3RgbdImuNode() override
@@ -204,6 +215,11 @@ private:
     double fy = 0.0;
     double cx = 0.0;
     double cy = 0.0;
+    double k1 = 0.0;
+    double k2 = 0.0;
+    double p1 = 0.0;
+    double p2 = 0.0;
+    double k3 = 0.0;
     double bf = 0.0;
     double th_depth = 40.0;
     int width = 0;
@@ -305,10 +321,11 @@ private:
     out << "Camera1.fy: "; fp(settings.fy); out << "\n";
     out << "Camera1.cx: "; fp(settings.cx); out << "\n";
     out << "Camera1.cy: "; fp(settings.cy); out << "\n";
-    out << "Camera1.k1: 0.0\n";
-    out << "Camera1.k2: 0.0\n";
-    out << "Camera1.p1: 0.0\n";
-    out << "Camera1.p2: 0.0\n";
+    out << "Camera1.k1: "; fp(settings.k1); out << "\n";
+    out << "Camera1.k2: "; fp(settings.k2); out << "\n";
+    out << "Camera1.p1: "; fp(settings.p1); out << "\n";
+    out << "Camera1.p2: "; fp(settings.p2); out << "\n";
+    out << "Camera1.k3: "; fp(settings.k3); out << "\n";
     out << "Camera.width: " << settings.width << "\n";
     out << "Camera.height: " << settings.height << "\n";
     out << "Camera.fps: " << settings.fps << "\n";
@@ -362,6 +379,11 @@ private:
 
     ImuSample sample;
     sample.stamp = rclcpp::Time(msg->header.stamp).seconds();
+    if (sample.stamp < last_imu_stamp_) {
+      imu_buffer_.clear();
+    }
+    last_imu_stamp_ = sample.stamp;
+    imu_frame_id_ = msg->header.frame_id;
     sample.ax = static_cast<float>(msg->linear_acceleration.x);
     sample.ay = static_cast<float>(msg->linear_acceleration.y);
     sample.az = static_cast<float>(msg->linear_acceleration.z);
@@ -374,12 +396,19 @@ private:
     while (!imu_buffer_.empty() && imu_buffer_.front().stamp < cutoff) {
       imu_buffer_.pop_front();
     }
+    imu_cv_.notify_all();
   }
 
   std::vector<ORB_SLAM3::IMU::Point> collect_imu_samples(double stamp)
   {
-    std::lock_guard<std::mutex> lock(imu_mutex_);
+    std::unique_lock<std::mutex> lock(imu_mutex_);
+    imu_cv_.wait_for(
+      lock, std::chrono::milliseconds(50),
+      [this, stamp]() {return last_imu_stamp_ >= stamp - imu_max_lag_sec_;});
     std::vector<ORB_SLAM3::IMU::Point> samples;
+    if (last_imu_stamp_ < stamp - imu_max_lag_sec_) {
+      return samples;
+    }
     while (!imu_buffer_.empty() && imu_buffer_.front().stamp <= stamp) {
       const auto sample = imu_buffer_.front();
       samples.emplace_back(
@@ -387,6 +416,104 @@ private:
       imu_buffer_.pop_front();
     }
     return samples;
+  }
+
+  bool initialize_slam(
+    const sensor_msgs::msg::Image::ConstSharedPtr & rgb_msg,
+    const sensor_msgs::msg::Image::ConstSharedPtr & depth_msg,
+    const sensor_msgs::msg::CameraInfo::ConstSharedPtr & info_msg,
+    const std::string & camera_frame)
+  {
+    if (info_msg->width != rgb_msg->width || info_msg->height != rgb_msg->height ||
+        depth_msg->width != rgb_msg->width || depth_msg->height != rgb_msg->height ||
+        !std::isfinite(info_msg->k[0]) || !std::isfinite(info_msg->k[4]) ||
+        info_msg->k[0] <= 0.0 || info_msg->k[4] <= 0.0) {
+      throttle_warn("Waiting for valid, dimension-matched RGB-D CameraInfo");
+      return false;
+    }
+
+    OrbSettings settings = orb_settings_;
+    settings.fx = info_msg->k[0];
+    settings.fy = info_msg->k[4];
+    settings.cx = info_msg->k[2];
+    settings.cy = info_msg->k[5];
+    settings.width = static_cast<int>(info_msg->width);
+    settings.height = static_cast<int>(info_msg->height);
+    settings.k1 = info_msg->d.size() > 0 ? info_msg->d[0] : 0.0;
+    settings.k2 = info_msg->d.size() > 1 ? info_msg->d[1] : 0.0;
+    settings.p1 = info_msg->d.size() > 2 ? info_msg->d[2] : 0.0;
+    settings.p2 = info_msg->d.size() > 3 ? info_msg->d[3] : 0.0;
+    settings.k3 = info_msg->d.size() > 4 ? info_msg->d[4] : 0.0;
+
+    if (slam_mode_ != "RGBD") {
+      std::string imu_frame;
+      {
+        std::lock_guard<std::mutex> lock(imu_mutex_);
+        imu_frame = imu_frame_id_;
+      }
+      if (imu_frame.empty()) {
+        throttle_warn("Waiting for the IMU message frame before initializing ORB-SLAM3");
+        return false;
+      }
+      try {
+        const auto tf = tf_buffer_->lookupTransform(
+          imu_frame, camera_frame, tf2_ros::fromMsg(depth_msg->header.stamp),
+          tf2::durationFromSec(0.1));
+        settings.t_b_c1 = transform_to_matrix(tf);
+      } catch (const std::exception & ex) {
+        throttle_warn(
+          std::string("Waiting for TF ") + camera_frame + " -> " + imu_frame + ": " + ex.what());
+        return false;
+      }
+    }
+
+    generated_settings_path_ = write_orb_settings_file(settings);
+    const auto sensor_mode = (slam_mode_ == "RGBD")
+      ? ORB_SLAM3::System::RGBD
+      : ORB_SLAM3::System::IMU_RGBD;
+    slam_ = std::make_unique<ORB_SLAM3::System>(
+      vocabulary_path_, generated_settings_path_, sensor_mode, false);
+    RCLCPP_INFO(
+      get_logger(),
+      "Initialized ORB-SLAM3 from CameraInfo: %ux%u fx=%.3f fy=%.3f cx=%.3f cy=%.3f%s",
+      info_msg->width, info_msg->height, settings.fx, settings.fy, settings.cx, settings.cy,
+      slam_mode_ == "RGBD" ? "" : " and live camera/IMU TF");
+    return true;
+  }
+
+  Eigen::Matrix4d make_anchor(const Eigen::Matrix4d & raw_pose) const
+  {
+    Eigen::Matrix4d desired = Eigen::Matrix4d::Identity();
+    if (slam_mode_ != "RGBD") {
+      const auto & rotation = raw_pose.topLeftCorner<3, 3>();
+      const double yaw = std::atan2(rotation(1, 0), rotation(0, 0));
+      desired.topLeftCorner<3, 3>() =
+        Eigen::AngleAxisd(-yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix() * rotation;
+    }
+    return desired * raw_pose.inverse();
+  }
+
+  static double rotation_delta(
+    const Eigen::Matrix4d & first, const Eigen::Matrix4d & second)
+  {
+    const Eigen::Quaterniond q_first(first.topLeftCorner<3, 3>());
+    const Eigen::Quaterniond q_second(second.topLeftCorner<3, 3>());
+    return 2.0 * std::acos(std::clamp(std::abs(q_first.dot(q_second)), 0.0, 1.0));
+  }
+
+  void publish_epoch(const std::string & reason)
+  {
+    std_msgs::msg::UInt32 msg;
+    msg.data = map_epoch_;
+    epoch_pub_->publish(msg);
+    RCLCPP_WARN(
+      get_logger(), "ORB map epoch %u: %s", map_epoch_, reason.c_str());
+  }
+
+  void advance_epoch(const std::string & reason)
+  {
+    ++map_epoch_;
+    publish_epoch(reason);
   }
 
   void rgbd_callback(
@@ -399,7 +526,40 @@ private:
       startup_wall_time_ = std::chrono::steady_clock::now();
     }
 
-    const double stamp = rclcpp::Time(depth_msg->header.stamp).seconds();
+    const double rgb_stamp = rclcpp::Time(rgb_msg->header.stamp).seconds();
+    const double depth_stamp = rclcpp::Time(depth_msg->header.stamp).seconds();
+    const double info_stamp = rclcpp::Time(info_msg->header.stamp).seconds();
+    if (std::abs(rgb_stamp - depth_stamp) > sync_max_delta_sec_ ||
+        std::abs(info_stamp - depth_stamp) > sync_max_delta_sec_) {
+      throttle_warn("Rejecting RGB-D-CameraInfo set outside sync_max_delta_sec");
+      return;
+    }
+
+    std::string camera_frame = camera_frame_id_;
+    if (camera_frame.empty()) {
+      camera_frame = !info_msg->header.frame_id.empty() ?
+        info_msg->header.frame_id : depth_msg->header.frame_id;
+    }
+    if (camera_frame.empty()) {
+      throttle_warn("Waiting for a camera optical frame_id");
+      return;
+    }
+
+    if (!slam_ && !initialize_slam(rgb_msg, depth_msg, info_msg, camera_frame)) {
+      return;
+    }
+
+    bool epoch_advanced = false;
+    if (last_tracking_stamp_ >= 0.0 && depth_stamp < last_tracking_stamp_) {
+      slam_->ResetActiveMap();
+      anchor_initialized_ = false;
+      pose_initialized_ = false;
+      tracking_lost_ = false;
+      advance_epoch("timestamp rollback; active map reset");
+      epoch_advanced = true;
+    }
+    last_tracking_stamp_ = depth_stamp;
+
     std::vector<ORB_SLAM3::IMU::Point> imu_samples;
 
     if (slam_mode_ != "RGBD") {
@@ -407,71 +567,96 @@ private:
         throttle_warn("Waiting for IMU samples on " + imu_topic_ + " before feeding ORB-SLAM3");
         return;
       }
-      imu_samples = collect_imu_samples(stamp);
+      imu_samples = collect_imu_samples(depth_stamp);
       if (imu_samples.empty()) {
         throttle_warn("No IMU samples available for current frame; skipping ORB-SLAM3 update");
         return;
       }
     }
 
-    cv::Mat rgb = cv_bridge::toCvShare(rgb_msg, sensor_msgs::image_encodings::BGR8)->image.clone();
-    cv::Mat depth = depth_message_to_cv(*depth_msg, depth_scale_);
+    Eigen::Matrix4d t_cam_base = Eigen::Matrix4d::Identity();
+    try {
+      const auto tf = tf_buffer_->lookupTransform(
+        camera_frame, base_frame_id_, tf2_ros::fromMsg(depth_msg->header.stamp),
+        tf2::durationFromSec(0.1));
+      t_cam_base = transform_to_matrix(tf);
+    } catch (const std::exception & ex) {
+      throttle_warn(
+        std::string("Waiting for TF ") + camera_frame + " -> " + base_frame_id_ + ": " + ex.what());
+      return;
+    }
 
-    const Sophus::SE3f t_cw = slam_->TrackRGBD(rgb, depth, stamp, imu_samples);
+    cv::Mat rgb = cv_bridge::toCvShare(
+      rgb_msg, sensor_msgs::image_encodings::BGR8)->image.clone();
+    cv::Mat depth = depth_message_to_cv(*depth_msg, depth_scale_);
+    const Sophus::SE3f t_cw = slam_->TrackRGBD(rgb, depth, depth_stamp, imu_samples);
     const auto tracking_state = slam_->GetTrackingState();
+    const bool map_changed = slam_->MapChanged();
+    if (tracking_state != last_tracking_state_) {
+      RCLCPP_INFO(get_logger(), "ORB tracking state: %d", tracking_state);
+      last_tracking_state_ = tracking_state;
+    }
     if (tracking_state != ORB_SLAM3::Tracking::OK &&
         tracking_state != ORB_SLAM3::Tracking::OK_KLT) {
+      if (had_tracking_) {
+        tracking_lost_ = true;
+      }
+      if (map_changed && !epoch_advanced) {
+        advance_epoch("ORB loop closure/global BA while tracking unavailable");
+      }
       throttle_warn("ORB-SLAM3 tracking lost for current frame");
       return;
     }
 
-    // Compute camera→base static TF (exo_color_optical_frame → exo_link)
-    std::string camera_frame = camera_frame_id_;
-    if (camera_frame.empty()) {
-      camera_frame = !info_msg->header.frame_id.empty() ? info_msg->header.frame_id : depth_msg->header.frame_id;
-    }
-    Eigen::Matrix4d t_cam_base = Eigen::Matrix4d::Identity();
-    try {
-      const auto tf = tf_buffer_->lookupTransform(
-        camera_frame, base_frame_id_, tf2_ros::fromMsg(rgb_msg->header.stamp), tf2::durationFromSec(0.1));
-      t_cam_base = transform_to_matrix(tf);
-    } catch (const std::exception & ex) {
-      throttle_warn(std::string("Waiting for TF ") + camera_frame + " -> " + base_frame_id_ + ": " + ex.what());
-      return;
-    }
-
-    // Full odom→exo_link pose
     const Eigen::Matrix4d t_w_c = t_cw.inverse().matrix().cast<double>();
-    const Eigen::Matrix4d t_w_base = t_w_c * t_cam_base;
+    const Eigen::Matrix4d raw_pose = t_w_c * t_cam_base;
+    if (!anchor_initialized_) {
+      map_anchor_ = make_anchor(raw_pose);
+      anchor_initialized_ = true;
+      RCLCPP_INFO(get_logger(), "Anchored first ORB base pose at zero translation/yaw");
+    }
+    Eigen::Matrix4d t_map_base = map_anchor_ * raw_pose;
 
-    // Frame-to-frame continuity
+    std::string correction_reason;
+    if (map_changed) {
+      correction_reason = "ORB loop closure/global BA";
+    }
+    if (tracking_lost_) {
+      correction_reason += correction_reason.empty() ? "tracking-loss recovery" : " + tracking-loss recovery";
+    }
     if (pose_initialized_) {
-      const Eigen::Vector3d dp = t_w_base.block<3, 1>(0, 3) - last_pose_.block<3, 1>(0, 3);
-      const double dist = dp.norm();
-      const Eigen::Quaterniond q_new(t_w_base.topLeftCorner<3, 3>());
-      const Eigen::Quaterniond q_old(last_pose_.topLeftCorner<3, 3>());
-      const double dot = std::abs(q_new.dot(q_old));
-      const double angle = 2.0 * std::acos(std::clamp(dot, 0.0, 1.0));
-      if (dist > 2.0 || angle > 1.0) {
-        throttle_warn(
-          std::string("Large frame-to-frame change: t=") + std::to_string(dist) +
-          "m angle=" + std::to_string(angle * 180.0 / M_PI) + "deg");
-        last_pose_ = t_w_base;
-        return;
+      const double dist = (
+        t_map_base.block<3, 1>(0, 3) - last_pose_.block<3, 1>(0, 3)).norm();
+      const double angle = rotation_delta(t_map_base, last_pose_);
+      if (!map_changed &&
+          (dist > pose_jump_translation_m_ || angle > pose_jump_rotation_rad_)) {
+        if (tracking_lost_) {
+          map_anchor_ = last_pose_ * raw_pose.inverse();
+          t_map_base = last_pose_;
+          correction_reason +=
+            " + large new-map pose jump; aligned recovery to last pose";
+        } else {
+          correction_reason += correction_reason.empty() ?
+            "large corrected pose jump" : " + large corrected pose jump";
+        }
       }
     }
-    last_pose_ = t_w_base;
+    tracking_lost_ = false;
+    if (!correction_reason.empty() && !epoch_advanced) {
+      advance_epoch(correction_reason);
+    }
+    last_pose_ = t_map_base;
     pose_initialized_ = true;
+    had_tracking_ = true;
 
-    // Publish odometry + TF
-    const Eigen::Quaterniond quat(t_w_base.topLeftCorner<3, 3>());
+    const Eigen::Quaterniond quat(t_map_base.topLeftCorner<3, 3>());
     nav_msgs::msg::Odometry odom;
-    odom.header.stamp = rgb_msg->header.stamp;
-    odom.header.frame_id = odom_frame_id_;
+    odom.header.stamp = depth_msg->header.stamp;
+    odom.header.frame_id = map_frame_id_;
     odom.child_frame_id = base_frame_id_;
-    odom.pose.pose.position.x = t_w_base(0, 3);
-    odom.pose.pose.position.y = t_w_base(1, 3);
-    odom.pose.pose.position.z = t_w_base(2, 3);
+    odom.pose.pose.position.x = t_map_base(0, 3);
+    odom.pose.pose.position.y = t_map_base(1, 3);
+    odom.pose.pose.position.z = t_map_base(2, 3);
     odom.pose.pose.orientation.x = quat.x();
     odom.pose.pose.orientation.y = quat.y();
     odom.pose.pose.orientation.z = quat.z();
@@ -479,14 +664,10 @@ private:
     odom_pub_->publish(odom);
 
     if (publish_tf_) {
-      auto tf = matrix_to_transform(t_w_base, odom_frame_id_, base_frame_id_, rgb_msg->header.stamp);
+      auto tf = matrix_to_transform(
+        t_map_base, map_frame_id_, base_frame_id_, depth_msg->header.stamp);
       tf_broadcaster_->sendTransform(tf);
     }
-    RCLCPP_INFO(
-      get_logger(), "Publish %s -> %s t=(%.3f %.3f %.3f) q=(%.3f %.3f %.3f %.3f)",
-      odom_frame_id_.c_str(), base_frame_id_.c_str(),
-      t_w_base(0, 3), t_w_base(1, 3), t_w_base(2, 3),
-      quat.x(), quat.y(), quat.z(), quat.w());
   }
 
   void throttle_warn(const std::string & msg)
@@ -511,7 +692,7 @@ private:
     missing_imu_reported_ = true;
     RCLCPP_ERROR(
       get_logger(),
-      "No IMU received on %s after %.1f s in %s mode. Falling back — no IMU data available.",
+      "No IMU received on %s after %.1f s in %s mode; startup remains blocked.",
       imu_topic_.c_str(), imu_timeout_sec_, slam_mode_.c_str());
   }
 
@@ -522,18 +703,24 @@ private:
   std::string depth_topic_;
   std::string imu_topic_;
   std::string camera_info_topic_;
-  std::string odom_frame_id_;
+  std::string map_frame_id_;
   std::string base_frame_id_;
   std::string camera_frame_id_;
   bool publish_tf_ = true;
   double depth_scale_ = 1.0;
   double imu_timeout_sec_ = 15.0;
+  double imu_max_lag_sec_ = 0.02;
+  double sync_max_delta_sec_ = 0.02;
+  double pose_jump_translation_m_ = 2.0;
+  double pose_jump_rotation_rad_ = 1.0;
   std::string slam_mode_ = "IMU_RGBD";
+  OrbSettings orb_settings_;
 
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
   std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
+  rclcpp::Publisher<std_msgs::msg::UInt32>::SharedPtr epoch_pub_;
 
   std::shared_ptr<message_filters::Subscriber<sensor_msgs::msg::Image>> rgb_sub_;
   std::shared_ptr<message_filters::Subscriber<sensor_msgs::msg::Image>> depth_sub_;
@@ -541,15 +728,26 @@ private:
   std::shared_ptr<message_filters::Synchronizer<message_filters::sync_policies::ApproximateTime<
     sensor_msgs::msg::Image, sensor_msgs::msg::Image, sensor_msgs::msg::CameraInfo>>> sync_;
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
+  rclcpp::CallbackGroup::SharedPtr imu_callback_group_;
 
   std::unique_ptr<ORB_SLAM3::System> slam_;
   std::deque<ImuSample> imu_buffer_;
   std::mutex imu_mutex_;
-  bool imu_seen_ = false;
+  std::condition_variable imu_cv_;
+  std::string imu_frame_id_;
+  std::atomic_bool imu_seen_{false};
   bool rgbd_seen_ = false;
   bool missing_imu_reported_ = false;
   double last_warn_sec_ = 0.0;
+  double last_imu_stamp_ = -1.0;
+  double last_tracking_stamp_ = -1.0;
+  uint32_t map_epoch_ = 0;
+  int last_tracking_state_ = -1;
+  bool had_tracking_ = false;
+  bool tracking_lost_ = false;
+  bool anchor_initialized_ = false;
   bool pose_initialized_ = false;
+  Eigen::Matrix4d map_anchor_ = Eigen::Matrix4d::Identity();
   Eigen::Matrix4d last_pose_ = Eigen::Matrix4d::Identity();
   std::chrono::steady_clock::time_point startup_wall_time_;
   rclcpp::TimerBase::SharedPtr startup_timer_;
@@ -559,7 +757,9 @@ int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
   auto node = std::make_shared<Orbslam3RgbdImuNode>();
-  rclcpp::spin(node);
+  rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 2);
+  executor.add_node(node);
+  executor.spin();
   rclcpp::shutdown();
   return 0;
 }

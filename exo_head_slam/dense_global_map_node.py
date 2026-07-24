@@ -15,6 +15,7 @@ from rclpy.qos import (
 )
 from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo, Image, PointCloud2, PointField
+from std_msgs.msg import UInt32
 from tf2_ros import Buffer, TransformListener
 
 
@@ -102,16 +103,25 @@ def transform_to_matrix(transform) -> np.ndarray:
 
 def project_rgbd(rgb: np.ndarray, depth: np.ndarray, camera_info: CameraInfo, downsample_factor: int,
                  min_depth: float, max_depth: float):
+    if rgb.ndim != 3 or rgb.shape[2] != 3 or depth.ndim != 2 or rgb.shape[:2] != depth.shape:
+        raise ValueError('RGB and depth dimensions must match')
+    if (camera_info.width and camera_info.width != depth.shape[1]) or (
+            camera_info.height and camera_info.height != depth.shape[0]):
+        raise ValueError('CameraInfo dimensions do not match RGB-D images')
+    if downsample_factor < 1:
+        raise ValueError('downsample_factor must be at least 1')
+
+    K = np.array(camera_info.k, dtype=np.float32).reshape(3, 3)
+    if not np.all(np.isfinite(K)) or K[0, 0] <= 0.0 or K[1, 1] <= 0.0:
+        raise ValueError('CameraInfo focal lengths must be finite and positive')
+
     if downsample_factor > 1:
         rgb = rgb[::downsample_factor, ::downsample_factor]
         depth = depth[::downsample_factor, ::downsample_factor]
-        K = np.array(camera_info.k, dtype=np.float32).reshape(3, 3)
         K[0, 0] /= downsample_factor
         K[1, 1] /= downsample_factor
         K[0, 2] /= downsample_factor
         K[1, 2] /= downsample_factor
-    else:
-        K = np.array(camera_info.k, dtype=np.float32).reshape(3, 3)
 
     if depth.dtype != np.float32:
         depth = depth.astype(np.float32)
@@ -130,14 +140,24 @@ def project_rgbd(rgb: np.ndarray, depth: np.ndarray, camera_info: CameraInfo, do
     return points, colors
 
 
+def clear_on_epoch(current_epoch, new_epoch, points, colors):
+    if current_epoch is None or current_epoch == new_epoch:
+        return new_epoch, points, colors
+    return (
+        new_epoch,
+        np.empty((0, 3), dtype=np.float32),
+        np.empty((0, 3), dtype=np.uint8),
+    )
+
+
 class DenseGlobalMapNode(Node):
     def __init__(self):
         super().__init__('dense_global_map_accumulator')
 
         self.declare_parameter('rgb_topic', '/exo/masked/image_raw')
-        self.declare_parameter('depth_topic', '/exo/combined/depth_raw')
+        self.declare_parameter('depth_topic', '/exo/masked/depth_raw')
         self.declare_parameter('camera_info_topic', '/camera/exo/color/camera_info')
-        self.declare_parameter('odom_frame_id', 'odom')
+        self.declare_parameter('map_frame_id', 'map')
         self.declare_parameter('voxel_size', 0.03)
         self.declare_parameter('max_points', 250000)
         self.declare_parameter('downsample_factor', 2)
@@ -149,7 +169,7 @@ class DenseGlobalMapNode(Node):
         self.rgb_topic = self.get_parameter('rgb_topic').value
         self.depth_topic = self.get_parameter('depth_topic').value
         self.camera_info_topic = self.get_parameter('camera_info_topic').value
-        self.odom_frame_id = self.get_parameter('odom_frame_id').value
+        self.map_frame_id = self.get_parameter('map_frame_id').value
         self.voxel_size = float(self.get_parameter('voxel_size').value)
         self.max_points = int(self.get_parameter('max_points').value)
         self.downsample_factor = int(self.get_parameter('downsample_factor').value)
@@ -185,13 +205,39 @@ class DenseGlobalMapNode(Node):
             depth=10,
         )
         self.cloud_pub = self.create_publisher(PointCloud2, '/orbslam/cloud_map', cloud_qos)
+        self.epoch_sub = self.create_subscription(
+            UInt32, '/orbslam/map_epoch', self.epoch_callback, cloud_qos
+        )
         self._points = np.empty((0, 3), dtype=np.float32)
         self._colors = np.empty((0, 3), dtype=np.uint8)
+        self._epoch = None
+        self._pending_frame = None
         self._last_warn_sec = 0.0
+        self.retry_timer = self.create_timer(0.02, self.retry_pending_frame)
 
         self.get_logger().info('Dense global map accumulator online')
 
     def callback(self, rgb_msg: Image, depth_msg: Image, info_msg: CameraInfo):
+        transform_time = Time.from_msg(depth_msg.header.stamp)
+        if not self.tf_buffer.can_transform(
+                self.map_frame_id, depth_msg.header.frame_id, transform_time):
+            self._pending_frame = (rgb_msg, depth_msg, info_msg)
+            return
+        self._pending_frame = None
+        self.accumulate_frame(rgb_msg, depth_msg, info_msg, transform_time)
+
+    def retry_pending_frame(self):
+        if self._pending_frame is None:
+            return
+        rgb_msg, depth_msg, info_msg = self._pending_frame
+        transform_time = Time.from_msg(depth_msg.header.stamp)
+        if self.tf_buffer.can_transform(
+                self.map_frame_id, depth_msg.header.frame_id, transform_time):
+            self._pending_frame = None
+            self.accumulate_frame(rgb_msg, depth_msg, info_msg, transform_time)
+
+    def accumulate_frame(
+            self, rgb_msg: Image, depth_msg: Image, info_msg: CameraInfo, transform_time: Time):
         try:
             rgb = self.bridge.imgmsg_to_cv2(rgb_msg, desired_encoding='rgb8')
             depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='passthrough')
@@ -201,24 +247,28 @@ class DenseGlobalMapNode(Node):
 
         try:
             tf = self.tf_buffer.lookup_transform(
-                self.odom_frame_id,
+                self.map_frame_id,
                 depth_msg.header.frame_id,
-                Time.from_msg(depth_msg.header.stamp),
+                transform_time,
                 timeout=Duration(seconds=self.lookup_timeout_sec),
             )
         except Exception as exc:
-            self._warn_throttled(f'No TF {depth_msg.header.frame_id} -> {self.odom_frame_id}: {exc}')
+            self._warn_throttled(f'No TF {depth_msg.header.frame_id} -> {self.map_frame_id}: {exc}')
             return
 
-        points_local, colors = project_rgbd(
-            rgb, depth, info_msg, self.downsample_factor, self.min_depth, self.max_depth
-        )
+        try:
+            points_local, colors = project_rgbd(
+                rgb, depth, info_msg, self.downsample_factor, self.min_depth, self.max_depth
+            )
+        except ValueError as exc:
+            self._warn_throttled(f'Invalid RGB-D frame: {exc}')
+            return
         if len(points_local) == 0:
             return
 
-        t_odom_cam = transform_to_matrix(tf)
-        rot = t_odom_cam[:3, :3]
-        trans = t_odom_cam[:3, 3]
+        t_map_cam = transform_to_matrix(tf)
+        rot = t_map_cam[:3, :3]
+        trans = t_map_cam[:3, 3]
         points_global = (points_local @ rot.T) + trans
 
         self._points = np.vstack([self._points, points_global.astype(np.float32)])
@@ -227,8 +277,17 @@ class DenseGlobalMapNode(Node):
             self._points, self._colors, self.voxel_size, self.max_points
         )
         self.cloud_pub.publish(
-            pointcloud2_from_xyzrgb(self._points, self._colors, self.odom_frame_id, depth_msg.header.stamp)
+            pointcloud2_from_xyzrgb(self._points, self._colors, self.map_frame_id, depth_msg.header.stamp)
         )
+
+    def epoch_callback(self, msg: UInt32):
+        old_epoch = self._epoch
+        self._epoch, self._points, self._colors = clear_on_epoch(
+            self._epoch, msg.data, self._points, self._colors
+        )
+        self._pending_frame = None
+        if old_epoch is not None and old_epoch != self._epoch:
+            self.get_logger().warn(f'Cleared dense map for ORB map epoch {self._epoch}')
 
     def _warn_throttled(self, msg: str):
         now_sec = self.get_clock().now().nanoseconds * 1e-9

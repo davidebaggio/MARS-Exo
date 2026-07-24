@@ -32,23 +32,10 @@ def _transform(position, quaternion):
     return result
 
 
-def rigid_alignment(source, target):
-    """Return metric SE(3) mapping source points into target coordinates."""
-    source_center = source.mean(axis=0)
-    target_center = target.mean(axis=0)
-    u, _, vt = np.linalg.svd((source - source_center).T @ (target - target_center))
-    rotation = vt.T @ u.T
-    if np.linalg.det(rotation) < 0:
-        vt[-1] *= -1
-        rotation = vt.T @ u.T
-    translation = target_center - rotation @ source_center
-    return rotation, translation
-
-
-def visualization_alignment(world_from_camera, map_start_z):
+def visualization_alignment(world_from_map, map_start_z):
     viz_ground_from_map = np.eye(4)
     viz_ground_from_map[2, 3] = map_start_z
-    return world_from_camera @ np.linalg.inv(viz_ground_from_map)
+    return world_from_map @ np.linalg.inv(viz_ground_from_map)
 
 
 def match_trajectories(estimated, ground_truth, waist_from_camera):
@@ -89,10 +76,24 @@ def match_trajectories(estimated, ground_truth, waist_from_camera):
     }
 
 
-def trajectory_metrics(matched):
+def first_pose_alignment(matched):
+    """Return the fixed world-from-map transform at the first overlap."""
+    map_from_exo = _transform(
+        matched['estimated_positions'][0], matched['estimated_quaternions'][0]
+    )
+    world_from_exo = _transform(
+        matched['gt_positions'][0], matched['gt_quaternions'][0]
+    )
+    return world_from_exo @ np.linalg.inv(map_from_exo)
+
+
+def trajectory_metrics(matched, world_from_map=None):
     estimated = matched['estimated_positions']
     ground_truth = matched['gt_positions']
-    align_rotation, align_translation = rigid_alignment(estimated, ground_truth)
+    if world_from_map is None:
+        world_from_map = first_pose_alignment(matched)
+    align_rotation = world_from_map[:3, :3]
+    align_translation = world_from_map[:3, 3]
     aligned = estimated @ align_rotation.T + align_translation
 
     aligned_rotations = Rotation.from_matrix(align_rotation) * Rotation.from_quat(
@@ -214,7 +215,8 @@ class BenchmarkEvaluatorNode(Node):
         self.gt_map = None
         self.estimated_map_frame = None
         self.gt_map_frame = None
-        self.first_gt_pose = None
+        self.world_from_map = None
+        self.alignment_timestamp = None
         self.visualization_tf_sent = False
         self.static_broadcaster = tf2_ros.StaticTransformBroadcaster(self)
         self.gt_tf_broadcaster = tf2_ros.TransformBroadcaster(self)
@@ -261,12 +263,10 @@ class BenchmarkEvaluatorNode(Node):
 
     def _estimated_odom(self, message):
         self.estimated_trajectory.append(self._pose(message))
+        self._publish_visualization_tf()
 
     def _gt_odom(self, message):
-        pose = self._pose(message)
-        self.gt_trajectory.append(pose)
-        if self.first_gt_pose is None:
-            self.first_gt_pose = pose
+        self.gt_trajectory.append(self._pose(message))
         self._publish_visualization_tf()
 
     def _estimated_map(self, message):
@@ -314,15 +314,20 @@ class BenchmarkEvaluatorNode(Node):
     def _publish_visualization_tf(self):
         if (
             self.visualization_tf_sent
-            or self.first_gt_pose is None
             or self.waist_from_camera is None
         ):
             return
 
-        _, position, quaternion = self.first_gt_pose
-        world_from_camera = _transform(position, quaternion) @ self.waist_from_camera
+        try:
+            matched = match_trajectories(
+                self.estimated_trajectory, self.gt_trajectory, self.waist_from_camera
+            )
+        except ValueError:
+            return
+        self.world_from_map = first_pose_alignment(matched)
+        self.alignment_timestamp = float(matched['times'][0])
         world_from_viz_ground = visualization_alignment(
-            world_from_camera, self.map_start_z
+            self.world_from_map, self.map_start_z
         )
 
         message = TransformStamped()
@@ -364,7 +369,12 @@ class BenchmarkEvaluatorNode(Node):
         matched = match_trajectories(
             self.estimated_trajectory, self.gt_trajectory, self.waist_from_camera
         )
-        trajectory, rotation, translation, aligned_positions = trajectory_metrics(matched)
+        if self.world_from_map is None:
+            self.world_from_map = first_pose_alignment(matched)
+            self.alignment_timestamp = float(matched['times'][0])
+        trajectory, rotation, translation, aligned_positions = trajectory_metrics(
+            matched, self.world_from_map
+        )
         aligned_map = self.estimated_map @ rotation.T + translation
         mapping = cloud_metrics(aligned_map, self.gt_map)
 
@@ -372,6 +382,8 @@ class BenchmarkEvaluatorNode(Node):
             'trajectory': trajectory,
             'map': mapping,
             'alignment': {
+                'method': 'first_overlapping_pose_se3',
+                'reference_timestamp': self.alignment_timestamp,
                 'rotation': rotation.tolist(),
                 'translation_m': translation.tolist(),
             },

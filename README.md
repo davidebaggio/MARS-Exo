@@ -118,7 +118,7 @@ After `colcon build`, generated ROS shim scripts may hardcode `/usr/bin/python3`
 Launch the pipeline:
 
 ```bash
-ros2 launch exo_head_slam main_pipeline_launch.py
+ros2 launch exo_head_slam main_pipeline_launch.py slam_mode:=RGBD
 ```
 
 Common launch arguments:
@@ -127,6 +127,7 @@ Common launch arguments:
 ros2 launch exo_head_slam main_pipeline_launch.py \
   use_sim_time:=true \
   publish_debug_pcl:=true \
+  slam_mode:=RGBD \
   orbslam3_vocabulary_path:=third_party/ORB_SLAM3/Vocabulary/ORBvoc.txt \
   orbslam3_settings_path:=config/orbslam3_exo.yaml \
   dense_map_voxel_size:=0.03 \
@@ -150,11 +151,15 @@ Run against a specific bag:
 When the bag contains `/ground_truth/global_map`, `run.sh` automatically enables
 the simulated exoskeleton dataset profile: metric `32FC1` depth, isolated GT TF
 topics, one-shot playback, extrinsic GT metrics, and trajectory/map evaluation.
+It also forces `slam_mode:=RGBD`, even if `SLAM_MODE=IMU_RGBD` is set: this
+dataset's roughly 3.5 Hz, low-excitation IMU cannot reliably initialize
+ORB-SLAM3 inertial optimization.
 Benchmark JSON and paired trajectory CSV files are written under `metrics/eval/`.
 On this branch, benchmark inputs are ORB-SLAM3 `/exo/odom` and `/orbslam/cloud_map`.
 RViz also shows `/ground_truth/global_map` in green, aligned to the estimated
-map at the first GT camera pose. GT odometry and a conflict-free `gt_*` TF tree
-are enabled; visible cloud/map displays are available disabled.
+map at the first timestamp where estimated and GT camera poses overlap. GT
+odometry and a conflict-free `gt_*` TF tree are enabled; visible cloud/map
+displays are available disabled.
 
 ## Topics
 
@@ -203,6 +208,11 @@ Runtime behavior is YAML-driven:
 - Semantic mask classes and confidence thresholds: `masker.*` parameters
 - ORB-SLAM3 settings template: `config/orbslam3_exo.yaml`
 - VGGT-Omega solver parameters: `extrinsic_solver` in `config/common.yaml`
+
+Use `slam_mode:=IMU_RGBD` only for recordings with calibrated camera-to-IMU
+extrinsics, monotonic timestamps, sufficient motion excitation, and an IMU
+sampled at roughly 100–200 Hz. Do not interpolate sparse IMU data to meet that
+rate.
 
 Important solver parameters:
 
