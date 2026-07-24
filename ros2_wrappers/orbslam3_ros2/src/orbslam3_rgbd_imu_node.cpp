@@ -18,6 +18,7 @@
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <rmw/qos_profiles.h>
 #include <sensor_msgs/image_encodings.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <sensor_msgs/msg/image.hpp>
@@ -161,9 +162,12 @@ public:
 
     using ApproxPolicy = message_filters::sync_policies::ApproximateTime<
       sensor_msgs::msg::Image, sensor_msgs::msg::Image, sensor_msgs::msg::CameraInfo>;
-    rgb_sub_ = std::make_shared<message_filters::Subscriber<sensor_msgs::msg::Image>>(this, rgb_topic_);
-    depth_sub_ = std::make_shared<message_filters::Subscriber<sensor_msgs::msg::Image>>(this, depth_topic_);
-    info_sub_ = std::make_shared<message_filters::Subscriber<sensor_msgs::msg::CameraInfo>>(this, camera_info_topic_);
+    rgb_sub_ = std::make_shared<message_filters::Subscriber<sensor_msgs::msg::Image>>(
+      this, rgb_topic_, rmw_qos_profile_sensor_data);
+    depth_sub_ = std::make_shared<message_filters::Subscriber<sensor_msgs::msg::Image>>(
+      this, depth_topic_, rmw_qos_profile_sensor_data);
+    info_sub_ = std::make_shared<message_filters::Subscriber<sensor_msgs::msg::CameraInfo>>(
+      this, camera_info_topic_, rmw_qos_profile_sensor_data);
     sync_ = std::make_shared<message_filters::Synchronizer<ApproxPolicy>>(
       ApproxPolicy(10), *rgb_sub_, *depth_sub_, *info_sub_);
     sync_->registerCallback(
@@ -308,7 +312,7 @@ private:
     out << "Camera.width: " << settings.width << "\n";
     out << "Camera.height: " << settings.height << "\n";
     out << "Camera.fps: " << settings.fps << "\n";
-    out << "Camera.RGB: 1\n";
+    out << "Camera.RGB: 0\n";
     out << "Stereo.ThDepth: "; fp(settings.th_depth); out << "\n";
     out << "Stereo.b: "; fp(settings.bf / std::max(settings.fx, 1e-6)); out << "\n";
     out << "RGBD.DepthMapFactor: "; fp(settings.depth_map_factor); out << "\n";
@@ -390,6 +394,11 @@ private:
     const sensor_msgs::msg::Image::ConstSharedPtr & depth_msg,
     const sensor_msgs::msg::CameraInfo::ConstSharedPtr & info_msg)
   {
+    if (!rgbd_seen_) {
+      rgbd_seen_ = true;
+      startup_wall_time_ = std::chrono::steady_clock::now();
+    }
+
     const double stamp = rclcpp::Time(depth_msg->header.stamp).seconds();
     std::vector<ORB_SLAM3::IMU::Point> imu_samples;
 
@@ -412,17 +421,8 @@ private:
     const auto tracking_state = slam_->GetTrackingState();
     if (tracking_state != ORB_SLAM3::Tracking::OK &&
         tracking_state != ORB_SLAM3::Tracking::OK_KLT) {
-      consecutive_ok_ = 0;
       throttle_warn("ORB-SLAM3 tracking lost for current frame");
       return;
-    }
-
-    // Stabilize: skip first 5 frames to avoid publishing bad initial pose,
-    // and after tracking loss require 5 consecutive OK frames before re-publishing
-    consecutive_ok_++;
-    const bool do_publish = consecutive_ok_ > 5;
-    if (!do_publish && consecutive_ok_ == 1) {
-      RCLCPP_INFO(get_logger(), "ORB-SLAM3 tracking stabilizing (%d/5)...", consecutive_ok_);
     }
 
     // Compute camera→base static TF (exo_color_optical_frame → exo_link)
@@ -444,7 +444,7 @@ private:
     const Eigen::Matrix4d t_w_c = t_cw.inverse().matrix().cast<double>();
     const Eigen::Matrix4d t_w_base = t_w_c * t_cam_base;
 
-    // Frame-to-frame continuity: update reference even during stabilization
+    // Frame-to-frame continuity
     if (pose_initialized_) {
       const Eigen::Vector3d dp = t_w_base.block<3, 1>(0, 3) - last_pose_.block<3, 1>(0, 3);
       const double dist = dp.norm();
@@ -462,10 +462,6 @@ private:
     }
     last_pose_ = t_w_base;
     pose_initialized_ = true;
-
-    if (!do_publish) {
-      return;
-    }
 
     // Publish odometry + TF
     const Eigen::Quaterniond quat(t_w_base.topLeftCorner<3, 3>());
@@ -487,8 +483,7 @@ private:
       tf_broadcaster_->sendTransform(tf);
     }
     RCLCPP_INFO(
-      get_logger(), "%s %s -> %s t=(%.3f %.3f %.3f) q=(%.3f %.3f %.3f %.3f)",
-      do_publish ? "Publish" : "Skip",
+      get_logger(), "Publish %s -> %s t=(%.3f %.3f %.3f) q=(%.3f %.3f %.3f %.3f)",
       odom_frame_id_.c_str(), base_frame_id_.c_str(),
       t_w_base(0, 3), t_w_base(1, 3), t_w_base(2, 3),
       quat.x(), quat.y(), quat.z(), quat.w());
@@ -506,7 +501,7 @@ private:
 
   void startup_watchdog()
   {
-    if (imu_seen_ || missing_imu_reported_) {
+    if (slam_mode_ == "RGBD" || !rgbd_seen_ || imu_seen_ || missing_imu_reported_) {
       return;
     }
     const auto elapsed = std::chrono::steady_clock::now() - startup_wall_time_;
@@ -551,9 +546,9 @@ private:
   std::deque<ImuSample> imu_buffer_;
   std::mutex imu_mutex_;
   bool imu_seen_ = false;
+  bool rgbd_seen_ = false;
   bool missing_imu_reported_ = false;
   double last_warn_sec_ = 0.0;
-  int consecutive_ok_ = 0;
   bool pose_initialized_ = false;
   Eigen::Matrix4d last_pose_ = Eigen::Matrix4d::Identity();
   std::chrono::steady_clock::time_point startup_wall_time_;

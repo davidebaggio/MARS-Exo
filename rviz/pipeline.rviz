@@ -9,9 +9,9 @@ Panels:
         - /ExoDepthImage1
         - /HeadDebugCloud1
         - /ExoDebugCloud1
-        - /VggtCloud1
-        - /GroundTruthGlobalMap1
-        - /GroundTruthOdometry1
+        - /VGGT Combined Cloud1
+        - /GT Global Map (world)1
+        - /GT Exoskeleton Odometry1
       Splitter Ratio: 0.5
     Tree Height: 500
   - Class: rviz_common/Views
@@ -99,7 +99,7 @@ Visualization Manager:
     - Class: rviz_default_plugins/PointCloud2
       Color Transformer: RGB8
       Enabled: true
-      Name: VggtCloud
+      Name: VGGT Combined Cloud
       Size (Pixels): 3
       Topic:
         Depth: 5
@@ -111,7 +111,7 @@ Visualization Manager:
     - Class: rviz_default_plugins/PointCloud2
       Color Transformer: RGB8
       Enabled: true
-      Name: OrbslamCloud
+      Name: ORB-SLAM3 Estimated Map
       Size (Pixels): 3
       Topic:
         Depth: 5
@@ -125,7 +125,7 @@ Visualization Manager:
       Color: 85; 255; 127
       Color Transformer: FlatColor
       Enabled: true
-      Name: GroundTruthGlobalMap
+      Name: GT Global Map (world)
       Size (Pixels): 2
       Topic:
         Depth: 1
@@ -139,7 +139,7 @@ Visualization Manager:
       Color: 255; 170; 0
       Color Transformer: FlatColor
       Enabled: false
-      Name: GroundTruthVisibleCloud
+      Name: GT Visible Cloud (world)
       Size (Pixels): 2
       Topic:
         Depth: 5
@@ -153,7 +153,7 @@ Visualization Manager:
       Color: 85; 170; 255
       Color Transformer: FlatColor
       Enabled: false
-      Name: GroundTruthVisibleMap
+      Name: GT Visible Map (world)
       Size (Pixels): 2
       Topic:
         Depth: 1
@@ -164,7 +164,7 @@ Visualization Manager:
       Value: false
     - Class: rviz_default_plugins/Odometry
       Enabled: true
-      Name: GroundTruthOdometry
+      Name: GT Exoskeleton Odometry
       Topic:
         Depth: 10
         Durability Policy: Volatile
@@ -189,7 +189,7 @@ Visualization Manager:
       Value: true
   Global Options:
     Background Color: 48; 48; 48
-    Fixed Frame: viz_ground
+    Fixed Frame: world
     Frame Rate: 30
   Name: root
   Tools:

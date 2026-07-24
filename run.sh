@@ -5,9 +5,9 @@ rm -f ~/.ros/*.db
 
 #DEFAULT_BAG="data/rosbag2_2026_06_11-15_25_14/rosbag2_2026_06_11-15_25_14_0.mcap"
 #DEFAULT_BAG="data/rosbag2_2026_06_11-15_31_00/rosbag2_2026_06_11-15_31_00_0.mcap"
-DEFAULT_BAG="data/rosbag2_2026_06_11-15_34_13/rosbag2_2026_06_11-15_34_13_0.mcap"
+#DEFAULT_BAG="data/rosbag2_2026_06_11-15_34_13/rosbag2_2026_06_11-15_34_13_0.mcap"
 
-#DEFAULT_BAG="data/exoskeleton_dataset/exoskeleton_dataset_0.mcap"
+DEFAULT_BAG="data/exoskeleton_dataset/exoskeleton_dataset_0.mcap"
 BAG_PATH="${1:-$DEFAULT_BAG}"
 
 cleanup() {
@@ -63,10 +63,10 @@ echo "Logging metrics to: $METRICS_CSV"
 
 BAG_INFO="$(ros2 bag info "$BAG_PATH" 2>/dev/null)"
 SLAM_MODE=RGBD
+ORB_SETTINGS_PATH=config/orbslam3_exo.yaml
 if grep -q 'Topic: /camera/exo/imu | Type: sensor_msgs/msg/Imu' <<<"$BAG_INFO"; then
 	SLAM_MODE=IMU_RGBD
 fi
-echo "ORB-SLAM3 mode: $SLAM_MODE"
 
 DATASET_MODE=false
 DEPTH_UNIT_SCALE=0.001
@@ -76,6 +76,8 @@ GT_CHILD_FRAME=""
 GT_TF_STATIC_TOPIC=""
 if grep -q 'Topic: /ground_truth/global_map' <<<"$BAG_INFO"; then
 	DATASET_MODE=true
+	SLAM_MODE=RGBD
+	ORB_SETTINGS_PATH=config/orbslam3_exoskeleton.yaml
 	DEPTH_UNIT_SCALE=1.0
 	EVALUATION_ENABLED=true
 	GT_PARENT_FRAME="front_camera_link"
@@ -83,6 +85,7 @@ if grep -q 'Topic: /ground_truth/global_map' <<<"$BAG_INFO"; then
 	GT_TF_STATIC_TOPIC="/ground_truth/tf_static"
 	echo "Detected exoskeleton_dataset: enabling GT benchmark"
 fi
+echo "ORB-SLAM3 mode: $SLAM_MODE"
 
 LAUNCH_ARGS=(
 	use_sim_time:=true
@@ -95,7 +98,7 @@ LAUNCH_ARGS=(
 	imu_topic:=/camera/exo/imu
 	slam_mode:="$SLAM_MODE"
 	orbslam3_vocabulary_path:=third_party/ORB_SLAM3/Vocabulary/ORBvoc.txt
-	orbslam3_settings_path:=config/orbslam3_exo.yaml
+	orbslam3_settings_path:="$ORB_SETTINGS_PATH"
 	map_start_z:=1
 	dense_map_voxel_size:=0.03
 	dense_map_max_points:=250000
