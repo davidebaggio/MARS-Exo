@@ -19,7 +19,7 @@ def load_section(config_path: str, section: str) -> dict:
 def generate_launch_description():
     """
     Launches RGB-D odometry plus RTAB-Map on the exo camera.
-    TF ownership: static map->odom identity, dynamic odom->exo_link from odometry.
+    TF ownership: dynamic map->odom from RTAB-Map, dynamic odom->exo_link from odometry.
     """
     use_sim_time_arg = DeclareLaunchArgument(
         'use_sim_time',
@@ -106,14 +106,6 @@ def generate_launch_description():
         output='screen'
     )
 
-    map_to_odom_tf = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='map_to_odom_tf',
-        arguments=['--frame-id', 'map', '--child-frame-id', 'odom'],
-        output='screen'
-    )
-
     exo_odometry = Node(
         package='rtabmap_odom',
         executable='rgbd_odometry',
@@ -129,12 +121,13 @@ def generate_launch_description():
         output='screen'
     )
 
-    # SLAM Node (Exo): consumes odometry; map->odom is intentionally static.
+    # SLAM Node (Exo): consumes odometry and owns the corrected map->odom TF.
     exo_rtabmap = Node(
         package='rtabmap_slam',
         executable='rtabmap',
         name='exo_rtabmap',
-        parameters=[{**base_params, **exo_params, 'publish_tf': False, 'subscribe_odom_info': True}],
+        parameters=[{**base_params, **exo_params, 'publish_tf': True, 'subscribe_odom_info': True}],
+        arguments=['-d'],
         remappings=[
             ('rgb/image', rgb_topic),
             ('depth/image', depth_topic),
@@ -173,7 +166,6 @@ def generate_launch_description():
         filtered_imu_topic_arg,
         map_start_z_arg,
         viz_ground_to_map_tf,
-        map_to_odom_tf,
         imu_filter,
         exo_odometry,
         exo_rtabmap,

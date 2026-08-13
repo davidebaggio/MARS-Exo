@@ -32,10 +32,10 @@ The expected TF structure is:
 
 ```text
 map -> odom -> exo_link -> head_link
-                 |
-                 v
-              vggt_world
 ```
+
+`/vggt/combined_pointcloud` is transformed into `exo_link` before publication,
+so its geometry stays consistent when the VGGT sliding-window world gauge changes.
 
 ## Package Contents
 
@@ -166,7 +166,8 @@ VGGT-Omega outputs:
 - `/exo/combined/depth_raw`
 - `/vggt/combined_pointcloud`
 - TF `exo_link -> head_link`
-- TF `exo_link -> vggt_world`
+
+The VGGT point cloud uses `exo_link` as its message frame.
 
 Debug outputs:
 

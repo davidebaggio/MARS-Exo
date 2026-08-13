@@ -27,7 +27,7 @@ exo_rtabmap:
     frame_id: "exo_link"
     map_frame_id: "map"
     odom_frame_id: "odom"
-    publish_tf: true            # rgbd_odometry publishes odom->exo_link; rtabmap map TF is disabled in launch
+    publish_tf: true            # launch assigns odom->exo_link to odometry and map->odom to RTAB-Map
     approx_sync: true
     approx_sync_max_interval: 0.02
     queue_size: 100

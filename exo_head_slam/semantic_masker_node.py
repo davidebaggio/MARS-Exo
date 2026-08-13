@@ -95,16 +95,21 @@ class SemanticMaskerNode(Node):
         self.model = YOLOSegModel(model_path, conf_threshold, list(dynamic_classes))
         self.bridge = CvBridge()
         from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-        qos = QoSProfile(
+        input_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10
+        )
+        output_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
             depth=10
         )
-        self.masked_rgb_pub = self.create_publisher(Image, self.output_rgb_topic, qos)
-        self.masked_depth_pub = self.create_publisher(Image, self.output_depth_topic, qos)
+        self.masked_rgb_pub = self.create_publisher(Image, self.output_rgb_topic, output_qos)
+        self.masked_depth_pub = self.create_publisher(Image, self.output_depth_topic, output_qos)
 
-        self.rgb_sub = message_filters.Subscriber(self, Image, self.input_rgb_topic, qos_profile=qos)
-        self.depth_sub = message_filters.Subscriber(self, Image, self.input_depth_topic, qos_profile=qos)
+        self.rgb_sub = message_filters.Subscriber(self, Image, self.input_rgb_topic, qos_profile=input_qos)
+        self.depth_sub = message_filters.Subscriber(self, Image, self.input_depth_topic, qos_profile=input_qos)
         
         sync_slop = self.get_parameter('sync_slop').value
         self.ts = message_filters.ApproximateTimeSynchronizer(

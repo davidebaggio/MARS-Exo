@@ -9,8 +9,8 @@ The package cleans the depth, removes dynamic objects, estimates the rigid trans
 Produce a **single fused 3D map** in a shared coordinate system.
 
 Pipeline separates pose-tracking from inter-camera calibration + dense-depth reconstruction:
-* **RTAB-Map + RGB-D odometry** run on the **Exo camera** stream. `map -> odom` is static identity, `rgbd_odometry` publishes dynamic `odom -> exo_link`, and RTAB-Map publishes the occupancy grid `/map` plus `/exo_rtabmap/cloud_map`.
-* **The VGGT Extrinsic Solver** dynamically calculates and broadcasts the spatial link between the cameras (**`exo_link -> head_link`** TF) and the VGGT-1B world frame (**`exo_link -> vggt_world`** TF), and uses the VGGT depth-head confidence to gate the published `/vggt/combined_pointcloud`.
+* **RTAB-Map + RGB-D odometry** run on the **Exo camera** stream. RTAB-Map publishes corrected dynamic `map -> odom`, `rgbd_odometry` publishes dynamic `odom -> exo_link`, and RTAB-Map publishes the occupancy grid `/map` plus `/exo_rtabmap/cloud_map`.
+* **The VGGT Extrinsic Solver** dynamically calculates and broadcasts the spatial link between the cameras (**`exo_link -> head_link`** TF), transforms its reconstruction into `exo_link`, and uses VGGT depth-head confidence to gate `/vggt/combined_pointcloud`.
 * **Dense Reconstruction**: the pipeline publishes combined depths (`/head/combined/depth_raw`, `/exo/combined/depth_raw`) and the conf-filtered `/vggt/combined_pointcloud` directly to RViz. Isaac ROS NVBlox volumetric fusion was removed in the latest refactor — point cloud visualization replaces it.
 
 ## Data Flow Overview
@@ -38,7 +38,7 @@ flowchart TD
     C1 --> F[VGGT Extrinsic Solver]
     C2 --> F
     F --> |TF: exo_link -> head_link| TF_TREE
-    F --> |TF: exo_link -> vggt_world| TF_TREE
+    F --> |PointCloud2 in exo_link| RV
 
     %% Depth combination
     F --> |Combined Depth| H_COMB[/head/combined/depth_raw/]
@@ -79,12 +79,12 @@ Uses a detector-backed masking step (YOLOv8-seg via Ultralytics). Zeros out mask
 
 ## 3. Pose Tracking & SLAM (RTAB-Map)
 
-RTAB-Map runs on the **Exo camera** stream with a separate `rgbd_odometry` node. The frame tree is fixed as `map -> odom` identity plus dynamic `odom -> exo_link` from visual odometry; the SLAM node consumes `/exo_rtabmap/odom` and does not publish `map -> odom` TF.
+RTAB-Map runs on the **Exo camera** stream with a separate `rgbd_odometry` node. RTAB-Map owns corrected dynamic `map -> odom`; visual odometry owns dynamic `odom -> exo_link`.
 
 ### Purpose
 * Provide RGB-D visual odometry and RTAB-Map mapping on the exo stream.
 * Calculate the camera's metric pose in the global frame.
-* Publish `odom -> exo_link` from visual odometry while keeping `map -> odom` static identity.
+* Publish `odom -> exo_link` from visual odometry and loop-closure corrections through RTAB-Map's `map -> odom`.
 * Optionally publish the 2D occupancy grid `/map` and the assembled `/exo_rtabmap/cloud_map`.
 
 ## 4. Deep-Learning-Based Extrinsic Solver (VGGT)
@@ -95,8 +95,8 @@ The extrinsic solver estimates the rigid transform between the cameras and combi
 * Align the two camera frames in SE(3).
 * Broadcast the resulting transform as a TF frame (**`exo_link -> head_link`**).
 * Scale predicted depths and point maps to align to the metric depth from the cameras.
-* Broadcast the VGGT world frame transform (**`exo_link -> vggt_world`**).
-* Publish a conf-filtered combined point cloud of both cameras in the shared `vggt_world` frame.
+* Transform VGGT world geometry into the current `exo_link` frame using the matching camera estimate.
+* Publish a confidence-filtered combined point cloud of both cameras in `exo_link`.
 
 ### Current Behavior
 The solver loads the pretrained **VGGT-1B** model. When synchronized image/depth pairs arrive, it runs the forward pass through `aggregator`, `camera_head`, and `depth_head`. The depth head returns `(depth_map, depth_conf)` — the per-pixel confidence (range `(1, +inf)`, `1 + exp(x)`) is now used to gate outputs:
