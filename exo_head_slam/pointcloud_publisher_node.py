@@ -4,6 +4,7 @@ from sensor_msgs.msg import Image, CameraInfo, PointCloud2, PointField
 from cv_bridge import CvBridge
 import numpy as np
 import message_filters
+from rclpy.qos import qos_profile_sensor_data
 
 
 class PointCloudPublisherNode(Node):
@@ -29,9 +30,12 @@ class PointCloudPublisherNode(Node):
         self.bridge = CvBridge()
 
         # Sync subscribers
-        self.rgb_sub = message_filters.Subscriber(self, Image, self.input_rgb_topic)
-        self.depth_sub = message_filters.Subscriber(self, Image, self.input_depth_topic)
-        self.info_sub = message_filters.Subscriber(self, CameraInfo, self.input_camera_info_topic)
+        self.rgb_sub = message_filters.Subscriber(
+            self, Image, self.input_rgb_topic, qos_profile=qos_profile_sensor_data)
+        self.depth_sub = message_filters.Subscriber(
+            self, Image, self.input_depth_topic, qos_profile=qos_profile_sensor_data)
+        self.info_sub = message_filters.Subscriber(
+            self, CameraInfo, self.input_camera_info_topic, qos_profile=qos_profile_sensor_data)
 
         # Track raw message arrivals
         self.rgb_sub.registerCallback(lambda _: self._count_msg('rgb'))

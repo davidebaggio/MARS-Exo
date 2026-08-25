@@ -3,12 +3,31 @@ set -euo pipefail
 
 #DEFAULT_BAG="data/rosbag2_2026_06_11-15_25_14/rosbag2_2026_06_11-15_25_14_0.mcap"
 #DEFAULT_BAG="data/rosbag2_2026_06_11-15_31_00/rosbag2_2026_06_11-15_31_00_0.mcap"
-DEFAULT_BAG="data/rosbag2_2026_06_11-15_34_13/rosbag2_2026_06_11-15_34_13_0.mcap"
+#DEFAULT_BAG="data/rosbag2_2026_06_11-15_34_13/rosbag2_2026_06_11-15_34_13_0.mcap"
+#DEFAULT_BAG="data/exoskeleton_dataset_0_0_0/exoskeleton_dataset_0_0_0.mcap"
+#DEFAULT_BAG="data/exoskeleton_dataset_1_20_35/exoskeleton_dataset_1_20_35.mcap"
+DEFAULT_BAG="data/exoskeleton_dataset_2_10_40/exoskeleton_dataset_2_10_40.mcap"
+
 BAG_PATH="${1:-$DEFAULT_BAG}"
+EXOSKELETON_DATASET=false
+GT_LAUNCH_ARGS=()
+EXO_PITCH_DEG=0
+HEAD_PITCH_DEG=0
 
 if [[ ! -e "$BAG_PATH" ]]; then
 	echo "Bag path not found: $BAG_PATH" >&2
 	exit 1
+fi
+if ros2 bag info "$BAG_PATH" 2>/dev/null | grep -q 'Topic: /exoskeleton/odom | Type: nav_msgs/msg/Odometry'; then
+	EXOSKELETON_DATASET=true
+	GT_LAUNCH_ARGS=(gt_parent_frame:=gt_exo_link gt_child_frame:=gt_head_link)
+	BAG_NAME="$(basename "$BAG_PATH" .mcap)"
+	if [[ "$BAG_NAME" =~ ^exoskeleton_dataset_[^_]+_(-?[0-9]+([.][0-9]+)?)_(-?[0-9]+([.][0-9]+)?)$ ]]; then
+		EXO_PITCH_DEG="${BASH_REMATCH[1]}"
+		HEAD_PITCH_DEG="${BASH_REMATCH[3]}"
+	else
+		echo "Warning: cannot parse camera pitches from $BAG_NAME; using 0/0 degrees." >&2
+	fi
 fi
 if [[ ! -f vggt-omega/vggt_omega/models/vggt_omega.py ]]; then
 	echo "VGGT-Omega submodule is not initialized. Run: git submodule update --init --recursive" >&2
@@ -40,6 +59,7 @@ cleanup() {
 	pkill -f 'depth_preprocessor' || true
 	pkill -f 'semantic_masker' || true
 	pkill -f 'extrinsic_solver' || true
+	pkill -f 'cloud_map_evaluator' || true
 	pkill -f 'ros2 bag play' || true
 }
 
@@ -82,6 +102,7 @@ fi
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 mkdir -p metrics/pipeline
 METRICS_CSV="metrics/pipeline/metrics_${TIMESTAMP}.csv"
+CLOUD_METRICS_CSV="${METRICS_CSV%.csv}_cloud.csv"
 echo "Logging metrics to: $METRICS_CSV"
 
 # fastcdr 2.2.5 needs the local compatibility shim. Current Jazzy releases do not.
@@ -105,13 +126,24 @@ if ros2 bag info "$BAG_PATH" 2>/dev/null | grep -q 'Topic: /camera/exo/imu | Typ
 fi
 echo "RTAB-Map IMU leveling: $USE_IMU"
 
-ros2 launch exo_head_slam main_pipeline_launch.py use_sim_time:=true publish_debug_pcl:=true metrics_csv_path:="$METRICS_CSV" use_imu:="$USE_IMU" imu_topic:=/camera/exo/imu &
+EVALUATE_CLOUD_MAP=false
+if ros2 bag info "$BAG_PATH" 2>/dev/null | grep -q 'Topic: /ground_truth/visible_cloud | Type: sensor_msgs/msg/PointCloud2'; then
+	EVALUATE_CLOUD_MAP=true
+	echo "Logging visible-cloud evaluation to: $CLOUD_METRICS_CSV"
+fi
+
+ros2 launch exo_head_slam main_pipeline_launch.py use_sim_time:=true publish_debug_pcl:=true metrics_csv_path:="$METRICS_CSV" cloud_metrics_csv_path:="$CLOUD_METRICS_CSV" evaluate_cloud_map:="$EVALUATE_CLOUD_MAP" exo_pitch_deg:="$EXO_PITCH_DEG" head_pitch_deg:="$HEAD_PITCH_DEG" use_imu:="$USE_IMU" imu_topic:=/camera/exo/imu exoskeleton_dataset:="$EXOSKELETON_DATASET" "${GT_LAUNCH_ARGS[@]}" &
 PIPELINE_PID=$!
 
 wait_for_pipeline
 
 echo "Starting bag playback: $BAG_PATH"
-ros2 bag play -i "$BAG_PATH" mcap --loop --rate 0.3 --disable-keyboard-controls --clock &
+PLAY_REMAP=()
+if [[ "$EXOSKELETON_DATASET" == true ]]; then
+	# Avoid duplicate parents; the launch file republishes only the camera transforms it needs.
+	PLAY_REMAP=(--remap /tf_static:=/recorded/tf_static)
+fi
+ros2 bag play -i "$BAG_PATH" mcap --loop --rate 0.3 --disable-keyboard-controls --clock "${PLAY_REMAP[@]}" &
      #--remap /tf:=/tf_old /tf_static:=/tf_static_old &
 BAG_PID=$!
 

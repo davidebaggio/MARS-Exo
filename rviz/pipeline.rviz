@@ -122,7 +122,7 @@ Visualization Manager:
       Class: rviz_default_plugins/Map
       Color Scheme: map
       Draw Backend: ogre
-      Enabled: true
+      Enabled: false
       Name: RtabmapGrid
       Topic:
         Depth: 5
