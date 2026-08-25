@@ -131,6 +131,7 @@ class ExtrinsicSolverNode(Node):
         self.current_t = None
         self.current_q = None
         self.image_buffer = []
+        self.dino_feature_buffer = []
         self.last_solver_time = None
 
         # Publishers
@@ -270,21 +271,27 @@ class ExtrinsicSolverNode(Node):
                 h_tensor, h_orig_h, h_orig_w, h_new_h, h_crop_y = self.preprocess_cv2_image(head_img)
                 e_tensor, e_orig_h, e_orig_w, e_new_h, e_crop_y = self.preprocess_cv2_image(exo_img)
 
-                self.image_buffer.append((h_tensor, e_tensor))
-                if len(self.image_buffer) > self.sliding_window_size:
-                    self.image_buffer.pop(0)
+                next_image_buffer = [*self.image_buffer, (h_tensor, e_tensor)][-self.sliding_window_size:]
 
                 all_tensors = []
-                for hb, eb in self.image_buffer:
+                for hb, eb in next_image_buffer:
                     all_tensors.extend([hb, eb])
                 images = torch.stack(all_tensors).unsqueeze(0).to(self.device)
-                M = len(self.image_buffer)
+                new_images = torch.stack([h_tensor, e_tensor]).unsqueeze(0).to(self.device)
+                M = len(next_image_buffer)
 
                 with torch.no_grad(), self.autocast_ctx:
-                    predictions = self.model(images)
+                    new_dino_features = self.model.extract_dino_features(new_images)
+                    next_dino_feature_buffer = [*self.dino_feature_buffer, new_dino_features][
+                        -self.sliding_window_size:
+                    ]
+                    predictions = self.model(images, dino_features=torch.cat(next_dino_feature_buffer, dim=0))
                     extrinsic, intrinsic = encoding_to_camera(predictions["pose_enc"], predictions["images"].shape[-2:])
                     depth_map = predictions["depth"]
                     depth_conf = predictions["depth_conf"]
+
+                self.image_buffer = next_image_buffer
+                self.dino_feature_buffer = next_dino_feature_buffer
 
                 E_head = extrinsic[0, 2 * M - 2].cpu().float().numpy()
                 E_exo = extrinsic[0, 2 * M - 1].cpu().float().numpy()
