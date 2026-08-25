@@ -9,14 +9,3 @@ head_depth_preprocessor:
     depth_filter.spatial.sigma_space: 3.0
     depth_filter.temporal.enabled: true
     depth_filter.temporal.alpha: 0.6
-
-head_semantic_masker:
-  ros__parameters:
-    input_rgb_topic: "/camera/head/color/image_raw"
-    input_depth_topic: "/head/filtered/depth_raw"
-    output_rgb_topic: "/head/masked/image_raw"
-    output_depth_topic: "/head/masked/depth_raw"
-    masker.model_path: "yolov8n-seg.pt"
-    masker.conf_threshold: 0.25
-    masker.dynamic_classes: [0, 1, 2, 3, 5, 7]
-    sync_slop: 0.035

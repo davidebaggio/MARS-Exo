@@ -8,6 +8,7 @@ import cv2
 import torch
 import message_filters
 import tf2_ros
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import Image, PointCloud2, PointField
 from geometry_msgs.msg import TransformStamped
@@ -285,7 +286,11 @@ class ExtrinsicSolverNode(Node):
                     next_dino_feature_buffer = [*self.dino_feature_buffer, new_dino_features][
                         -self.sliding_window_size:
                     ]
-                    predictions = self.model(images, dino_features=torch.cat(next_dino_feature_buffer, dim=0))
+                    predictions = self.model(
+                        images,
+                        dino_features=torch.cat(next_dino_feature_buffer, dim=0),
+                        depth_frame_range=(2 * M - 2, 2 * M),
+                    )
                     extrinsic, intrinsic = encoding_to_camera(predictions["pose_enc"], predictions["images"].shape[-2:])
                     depth_map = predictions["depth"]
                     depth_conf = predictions["depth_conf"]
@@ -296,10 +301,10 @@ class ExtrinsicSolverNode(Node):
                 E_head = extrinsic[0, 2 * M - 2].cpu().float().numpy()
                 E_exo = extrinsic[0, 2 * M - 1].cpu().float().numpy()
 
-                h_pred_depth = depth_map[0, 2 * M - 2, ..., 0].cpu().float().numpy()
-                e_pred_depth = depth_map[0, 2 * M - 1, ..., 0].cpu().float().numpy()
-                h_conf = depth_conf[0, 2 * M - 2].cpu().float().numpy()
-                e_conf = depth_conf[0, 2 * M - 1].cpu().float().numpy()
+                h_pred_depth = depth_map[0, 0, ..., 0].cpu().float().numpy()
+                e_pred_depth = depth_map[0, 1, ..., 0].cpu().float().numpy()
+                h_conf = depth_conf[0, 0].cpu().float().numpy()
+                e_conf = depth_conf[0, 1].cpu().float().numpy()
 
                 self.get_logger().info(
                     f"VGGT-Omega: depth_map={depth_map.shape} depth_conf={depth_conf.shape}"
@@ -504,7 +509,8 @@ class ExtrinsicSolverNode(Node):
             except Exception as e:
                 self.get_logger().error(f"VGGT extrinsic solver callback failed: {str(e)}")
                 self.image_buffer.clear()
-                if self.device == "cuda":
+                self.dino_feature_buffer.clear()
+                if isinstance(e, torch.cuda.OutOfMemoryError):
                     torch.cuda.empty_cache()
                 self._log_metrics(stamp_sec, 'SOLVER_ERROR', scale=scale,
                                   head_depth_rmse=head_depth_rmse, head_depth_mae=head_depth_mae,
@@ -515,8 +521,6 @@ class ExtrinsicSolverNode(Node):
         # Always broadcast the last known good transforms to keep TF tree active
         if self.current_t is not None:
             self.broadcast_transform(e_rgb.header.stamp)
-        if self.device == "cuda":
-            torch.cuda.empty_cache()
 
     def publish_vggt_pointcloud(self, h_raw_depth, e_raw_depth, h_color, e_color,
                                 h_pred_depth, e_pred_depth, h_conf, e_conf,
@@ -700,11 +704,12 @@ def main(args=None):
     node = ExtrinsicSolverNode()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            node.destroy_node()
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

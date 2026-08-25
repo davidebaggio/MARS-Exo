@@ -3,7 +3,6 @@ from launch.actions import IncludeLaunchDescription
 from launch.actions import LogInfo
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
-from launch_ros.parameter_descriptions import ParameterValue
 from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
 from launch.substitutions import PathJoinSubstitution, LaunchConfiguration, PythonExpression
 from launch_ros.substitutions import FindPackageShare
@@ -36,20 +35,6 @@ def generate_launch_description():
         description='Path to the metrics CSV file'
     )
     metrics_csv_path = LaunchConfiguration('metrics_csv_path')
-
-    cloud_metrics_csv_path_arg = DeclareLaunchArgument(
-        'cloud_metrics_csv_path',
-        default_value='cloud_metrics.csv',
-        description='Path to the visible-cloud evaluation CSV file'
-    )
-    cloud_metrics_csv_path = LaunchConfiguration('cloud_metrics_csv_path')
-
-    evaluate_cloud_map_arg = DeclareLaunchArgument(
-        'evaluate_cloud_map',
-        default_value='false',
-        description='Evaluate VGGT clouds against synchronized GT visible clouds'
-    )
-    evaluate_cloud_map = LaunchConfiguration('evaluate_cloud_map')
 
     gt_parent_frame_arg = DeclareLaunchArgument('gt_parent_frame', default_value='')
     gt_parent_frame = LaunchConfiguration('gt_parent_frame')
@@ -112,20 +97,11 @@ def generate_launch_description():
         parameters=[exo_config, common_params],
     )
     
-    # Head Masker
-    head_masker = Node(
+    semantic_masker = Node(
         package='exo_head_slam',
         executable='semantic_masker',
-        name='head_semantic_masker',
-        parameters=[head_config, common_params],
-    )
-    
-    # Exo Masker
-    exo_masker = Node(
-        package='exo_head_slam',
-        executable='semantic_masker',
-        name='exo_semantic_masker',
-        parameters=[exo_config, common_params],
+        name='semantic_masker',
+        parameters=[common_config, common_params],
     )
     
     # Extrinsic Solver
@@ -138,17 +114,6 @@ def generate_launch_description():
             'gt_parent_frame': gt_parent_frame,
             'gt_child_frame': gt_child_frame,
         }],
-    )
-
-    cloud_map_evaluator = Node(
-        package='exo_head_slam',
-        executable='cloud_map_evaluator',
-        name='cloud_map_evaluator',
-        parameters=[common_config, common_params, {
-            'metrics_csv_path': cloud_metrics_csv_path,
-            'waist_to_exo_pitch_deg': ParameterValue(exo_pitch_deg, value_type=float),
-        }],
-        condition=IfCondition(evaluate_cloud_map),
     )
 
     # Debug PointCloud Publishers
@@ -188,8 +153,6 @@ def generate_launch_description():
         use_sim_time_arg,
         publish_debug_pcl_arg,
         metrics_csv_path_arg,
-        cloud_metrics_csv_path_arg,
-        evaluate_cloud_map_arg,
         gt_parent_frame_arg,
         gt_child_frame_arg,
         exo_pitch_deg_arg,
@@ -261,10 +224,8 @@ def generate_launch_description():
     actions.extend([
         head_depth_preprocessor,
         exo_depth_preprocessor,
-        head_masker,
-        exo_masker,
+        semantic_masker,
         extrinsic_solver,
-        cloud_map_evaluator,
         head_pcl_pub,
         exo_pcl_pub,
     ])

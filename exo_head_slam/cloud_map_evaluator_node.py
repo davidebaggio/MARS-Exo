@@ -5,6 +5,7 @@ import message_filters
 import numpy as np
 import rclpy
 from nav_msgs.msg import Odometry
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from scipy.spatial import cKDTree
@@ -134,11 +135,12 @@ def main(args=None):
     node = CloudMapEvaluatorNode()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            node.destroy_node()
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

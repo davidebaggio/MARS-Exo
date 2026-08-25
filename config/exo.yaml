@@ -10,17 +10,6 @@ exo_depth_preprocessor:
     depth_filter.temporal.enabled: true
     depth_filter.temporal.alpha: 0.6
 
-exo_semantic_masker:
-  ros__parameters:
-    input_rgb_topic: "/camera/exo/color/image_raw"
-    input_depth_topic: "/exo/filtered/depth_raw"
-    output_rgb_topic: "/exo/masked/image_raw"
-    output_depth_topic: "/exo/masked/depth_raw"
-    masker.model_path: "yolov8n-seg.pt"
-    masker.conf_threshold: 0.20
-    masker.dynamic_classes: [0, 1, 2, 3, 5, 7]
-    sync_slop: 0.02
-
 exo_rtabmap:
   ros__parameters:
     subscribe_depth: true

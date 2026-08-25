@@ -404,7 +404,8 @@ def main(args=None):
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        node.destroy_node()
+        if rclpy.ok():
+            node.destroy_node()
         rclpy.try_shutdown()
 
 

@@ -1,3 +1,20 @@
+semantic_masker:
+  ros__parameters:
+    head.input_rgb_topic: "/camera/head/color/image_raw"
+    head.input_depth_topic: "/head/filtered/depth_raw"
+    head.output_rgb_topic: "/head/masked/image_raw"
+    head.output_depth_topic: "/head/masked/depth_raw"
+    head.conf_threshold: 0.25
+    head.dynamic_classes: [0, 1, 2, 3, 5, 7]
+    exo.input_rgb_topic: "/camera/exo/color/image_raw"
+    exo.input_depth_topic: "/exo/filtered/depth_raw"
+    exo.output_rgb_topic: "/exo/masked/image_raw"
+    exo.output_depth_topic: "/exo/masked/depth_raw"
+    exo.conf_threshold: 0.20
+    exo.dynamic_classes: [0, 1, 2, 3, 5, 7]
+    masker.model_path: "yolov8n-seg.pt"
+    sync_slop: 0.035
+
 extrinsic_solver:
   ros__parameters:
     head_rgb_topic: "/head/masked/image_raw"

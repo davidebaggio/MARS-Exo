@@ -13,6 +13,10 @@ EXOSKELETON_DATASET=false
 GT_LAUNCH_ARGS=()
 EXO_PITCH_DEG=0
 HEAD_PITCH_DEG=0
+CLOUD_RECORD_PID=""
+CLOUD_EVAL_BAG=""
+CLOUD_METRICS_CSV=""
+OFFLINE_COMMAND_PRINTED=false
 
 if [[ ! -e "$BAG_PATH" ]]; then
 	echo "Bag path not found: $BAG_PATH" >&2
@@ -46,6 +50,11 @@ if [[ ! -f yolov8n-seg.pt ]]; then
 fi
 
 cleanup() {
+	if [[ -n "${CLOUD_RECORD_PID:-}" ]] && kill -0 "$CLOUD_RECORD_PID" 2>/dev/null; then
+		kill -INT "$CLOUD_RECORD_PID" || true
+		wait "$CLOUD_RECORD_PID" || true
+		CLOUD_RECORD_PID=""
+	fi
 	if [[ -n "${BAG_PID:-}" ]] && kill -0 "$BAG_PID" 2>/dev/null; then
 		kill "$BAG_PID" || true
 	fi
@@ -61,12 +70,17 @@ cleanup() {
 	pkill -f 'extrinsic_solver' || true
 	pkill -f 'cloud_map_evaluator' || true
 	pkill -f 'ros2 bag play' || true
+	if [[ -n "${CLOUD_EVAL_BAG:-}" && "$OFFLINE_COMMAND_PRINTED" == false ]]; then
+		echo "Offline cloud evaluation command:"
+		echo "source install/setup.bash && ros2 launch exo_head_slam cloud_map_evaluation_launch.py bag_path:=$CLOUD_EVAL_BAG metrics_csv_path:=$CLOUD_METRICS_CSV"
+		OFFLINE_COMMAND_PRINTED=true
+	fi
 }
 
 wait_for_pipeline() {
 	local attempts=30
 	while [[ "$attempts" -gt 0 ]]; do
-		if ros2 node list 2>/dev/null | grep -qE '(/head_semantic_masker|/exo_semantic_masker|/extrinsic_solver)'; then
+		if ros2 node list 2>/dev/null | grep -qE '(/semantic_masker|/extrinsic_solver)'; then
 			return 0
 		fi
 		attempts=$((attempts - 1))
@@ -102,7 +116,6 @@ fi
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 mkdir -p metrics/pipeline
 METRICS_CSV="metrics/pipeline/metrics_${TIMESTAMP}.csv"
-CLOUD_METRICS_CSV="${METRICS_CSV%.csv}_cloud.csv"
 echo "Logging metrics to: $METRICS_CSV"
 
 # fastcdr 2.2.5 needs the local compatibility shim. Current Jazzy releases do not.
@@ -126,16 +139,26 @@ if ros2 bag info "$BAG_PATH" 2>/dev/null | grep -q 'Topic: /camera/exo/imu | Typ
 fi
 echo "RTAB-Map IMU leveling: $USE_IMU"
 
-EVALUATE_CLOUD_MAP=false
+RECORD_CLOUD_MAP=false
 if ros2 bag info "$BAG_PATH" 2>/dev/null | grep -q 'Topic: /ground_truth/visible_cloud | Type: sensor_msgs/msg/PointCloud2'; then
-	EVALUATE_CLOUD_MAP=true
-	echo "Logging visible-cloud evaluation to: $CLOUD_METRICS_CSV"
+	RECORD_CLOUD_MAP=true
+	CLOUD_METRICS_CSV="${METRICS_CSV%.csv}_cloud.csv"
+	CLOUD_EVAL_BAG="${METRICS_CSV%.csv}_cloud_bag"
+	echo "Recording cloud evaluation inputs to: $CLOUD_EVAL_BAG"
 fi
 
-ros2 launch exo_head_slam main_pipeline_launch.py use_sim_time:=true publish_debug_pcl:=true metrics_csv_path:="$METRICS_CSV" cloud_metrics_csv_path:="$CLOUD_METRICS_CSV" evaluate_cloud_map:="$EVALUATE_CLOUD_MAP" exo_pitch_deg:="$EXO_PITCH_DEG" head_pitch_deg:="$HEAD_PITCH_DEG" use_imu:="$USE_IMU" imu_topic:=/camera/exo/imu exoskeleton_dataset:="$EXOSKELETON_DATASET" "${GT_LAUNCH_ARGS[@]}" &
+ros2 launch exo_head_slam main_pipeline_launch.py use_sim_time:=true publish_debug_pcl:=true metrics_csv_path:="$METRICS_CSV" exo_pitch_deg:="$EXO_PITCH_DEG" head_pitch_deg:="$HEAD_PITCH_DEG" use_imu:="$USE_IMU" imu_topic:=/camera/exo/imu exoskeleton_dataset:="$EXOSKELETON_DATASET" "${GT_LAUNCH_ARGS[@]}" &
 PIPELINE_PID=$!
 
 wait_for_pipeline
+
+if [[ "$RECORD_CLOUD_MAP" == true ]]; then
+	ros2 bag record -s mcap -o "$CLOUD_EVAL_BAG" --disable-keyboard-controls \
+		--custom-data "exo_pitch_deg=$EXO_PITCH_DEG" --topics \
+		/vggt/combined_pointcloud /ground_truth/visible_cloud /exoskeleton/odom &
+	CLOUD_RECORD_PID=$!
+	sleep 1
+fi
 
 echo "Starting bag playback: $BAG_PATH"
 PLAY_REMAP=()
@@ -143,7 +166,7 @@ if [[ "$EXOSKELETON_DATASET" == true ]]; then
 	# Avoid duplicate parents; the launch file republishes only the camera transforms it needs.
 	PLAY_REMAP=(--remap /tf_static:=/recorded/tf_static)
 fi
-ros2 bag play -i "$BAG_PATH" mcap --loop --rate 0.3 --disable-keyboard-controls --clock "${PLAY_REMAP[@]}" &
+ros2 bag play -i "$BAG_PATH" mcap --loop --rate 0.8 --disable-keyboard-controls --clock "${PLAY_REMAP[@]}" &
      #--remap /tf:=/tf_old /tf_static:=/tf_static_old &
 BAG_PID=$!
 

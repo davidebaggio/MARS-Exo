@@ -25,19 +25,20 @@ After `colcon build`, the generated shim scripts in `install/exo_head_slam/lib/e
 | `semantic_masker` | `semantic_masker_node.py` | YOLOv8-seg dynamic object removal |
 | `extrinsic_solver` | `extrinsic_solver_node.py` | VGGT-1B joint extrinsic + depth estimation, with depth-head confidence gating |
 | `pointcloud_publisher` | `pointcloud_publisher_node.py` | Debug per-camera XYZRGB PointCloud2 from RGB-D (behind `publish_debug_pcl` flag) |
-| `cloud_map_evaluator` | `cloud_map_evaluator_node.py` | Per-frame VGGT evaluation against `/ground_truth/visible_cloud` |
+| `cloud_map_evaluator` | `cloud_map_evaluator_node.py` | Offline VGGT evaluation against `/ground_truth/visible_cloud` |
 
 ## Launch
 
-- **`launch/main_pipeline_launch.py`** — top-level entry point. Starts the custom nodes (depth_preprocessor x2, semantic_masker x2, extrinsic_solver, pointcloud_publisher x2 debug) + static TF publishers.
+- **`launch/main_pipeline_launch.py`** — top-level entry point. Starts the custom nodes (depth_preprocessor x2, one batched semantic_masker, extrinsic_solver, pointcloud_publisher x2 debug) + static TF publishers.
+- **`launch/cloud_map_evaluation_launch.py`** — replays the three-topic evaluation bag recorded by `run.sh` and computes visible-cloud metrics offline.
 - **`launch/rtabmap_agents_launch.py`** — conditionally included by the top launch only if `rtabmap_slam` and `rtabmap_odom` are found. Launches `rtabmap_odom/rgbd_odometry` plus `rtabmap_slam` on the **exo** camera. Publishes static `map -> odom` identity and dynamic `odom -> exo_link`. Silently skipped if `rtabmap_slam` or `rtabmap_odom` is missing.
 
 ## Configuration
 
 All runtime parameters live in YAML, not in code:
-- `config/head.yaml` — head camera pipeline (depth_preprocessor, semantic_masker)
-- `config/exo.yaml` — exo camera pipeline (depth_preprocessor, semantic_masker, exo_rtabmap)
-- `config/common.yaml` — extrinsic solver params (VGGT conf gating, metrics)
+- `config/head.yaml` — head depth preprocessor
+- `config/exo.yaml` — exo depth preprocessor and exo_rtabmap
+- `config/common.yaml` — batched semantic masker, extrinsic solver, and offline evaluator params
 
 ## Optional Dependencies
 
@@ -54,7 +55,8 @@ Head RGB + depth → depth_preprocessor → semantic_masker ─┐
                                                           ├─ extrinsic_solver (VGGT-1B) → TF exo_link→head_link, vggt_world
 Exo RGB + depth  → depth_preprocessor → semantic_masker ─┘                                  ↘ combined depth fills, /vggt/combined_pointcloud
 
-/vggt/combined_pointcloud + /exoskeleton/odom → cloud_map_evaluator ← /ground_truth/visible_cloud
+/vggt/combined_pointcloud + /exoskeleton/odom → evaluation bag ← /ground_truth/visible_cloud
+evaluation bag → offline cloud_map_evaluator → cloud metrics CSV
 
 RTAB-Map + rgbd_odometry (exo) → static TF map→odom + dynamic TF odom→exo_link → exo_rtabmap/cloud_map + /map (optional)
 ```

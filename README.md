@@ -138,7 +138,7 @@ Run against a specific bag:
 ./run.sh /path/to/bag/file.mcap
 ```
 
-`run.sh` builds the package, sources the workspace, fixes Python shebangs, starts the pipeline, plays the bag with `/clock`, writes metrics under `metrics/pipeline/`, and opens `rviz/pipeline.rviz`.
+`run.sh` builds the package, sources the workspace, fixes Python shebangs, starts the pipeline, plays the bag with `/clock`, writes metrics under `metrics/pipeline/`, and opens `rviz/pipeline.rviz`. When visible-cloud ground truth is present, it records the VGGT cloud, ground-truth cloud, and odometry without evaluating them live. On shutdown it prints the `cloud_map_evaluation_launch.py` command that computes the CSV offline.
 
 When the bag contains `/ground_truth/global_map`, `run.sh` automatically enables
 the simulated exoskeleton dataset profile: metric `32FC1` depth, isolated GT TF
