@@ -65,14 +65,8 @@ class DepthPreprocessorNode(Node):
 
     def to_meters(self, depth_image: np.ndarray, encoding: str) -> np.ndarray:
         depth_m = depth_image.astype(np.float32).copy()
-        if encoding in ['16UC1', '16uc1'] or self.depth_unit_scale != 1.0:
-            # Scale if explicitly encoded as mm, or if user overrides with a non-1 scale
-            # (assuming default scale in common.yaml might handle weird cases)
-            if encoding in ['16UC1', '16uc1'] and self.depth_unit_scale == 1.0:
-                 # Default scale for 16UC1 if not specified
-                 depth_m *= 0.001
-            else:
-                 depth_m *= self.depth_unit_scale
+        if encoding.lower() == '16uc1':
+            depth_m *= self.depth_unit_scale
         
         return np.nan_to_num(depth_m, nan=0.0, posinf=0.0, neginf=0.0)
 

@@ -13,6 +13,7 @@ from sensor_msgs.msg import Image, PointCloud2, PointField
 from geometry_msgs.msg import TransformStamped
 from tf2_msgs.msg import TFMessage
 from cv_bridge import CvBridge
+from .utils.vision_utils import blend_depth_holes, transform_points, unproject_depth_np
 
 # Locate vggt-omega directory dynamically
 _current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -127,10 +128,8 @@ class ExtrinsicSolverNode(Node):
             )
 
         # State
-        self.current_t = np.array([-0.3, 0.0, 0.5])
-        self.current_q = np.array([0.0, 0.0, 0.0, 1.0])
-        self.current_vggt_world_t = np.array([-0.3, 0.0, 0.5])
-        self.current_vggt_world_q = np.array([0.0, 0.0, 0.0, 1.0])
+        self.current_t = None
+        self.current_q = None
         self.image_buffer = []
         self.last_solver_time = None
 
@@ -215,14 +214,13 @@ class ExtrinsicSolverNode(Node):
         return depth_resized
 
     def blend_depth(self, raw_depth, pred_depth, raw_valid, conf_mask):
-        use_vggt = ~raw_valid
-        if self.conf_gate_combine:
-            use_vggt = use_vggt & conf_mask
-
-        combined = np.where(use_vggt, pred_depth, raw_depth)
-        combined = np.nan_to_num(combined, nan=0.0, posinf=0.0, neginf=0.0)
-        combined[combined < 0.0] = 0.0
-        return combined
+        return blend_depth_holes(
+            raw_depth,
+            pred_depth,
+            raw_valid,
+            conf_mask,
+            self.conf_gate_combine,
+        )
 
     def tf_to_matrix(self, tf):
         mat = np.eye(4)
@@ -246,23 +244,6 @@ class ExtrinsicSolverNode(Node):
 
     def _conf_mask(self, conf_np: np.ndarray) -> np.ndarray:
         return conf_np >= self._conf_threshold(conf_np)
-
-    def unproject_depth_np(self, depth, extrinsic, intrinsic):
-        height, width = depth.shape
-        y, x = np.meshgrid(np.arange(height), np.arange(width), indexing="ij")
-
-        camera_points = np.stack(
-            [
-                (x - intrinsic[0, 2]) / intrinsic[0, 0] * depth,
-                (y - intrinsic[1, 2]) / intrinsic[1, 1] * depth,
-                depth,
-            ],
-            axis=-1,
-        )
-
-        rotation = extrinsic[:3, :3]
-        translation = extrinsic[:3, 3]
-        return np.einsum("ij,hwj->hwi", rotation.T, camera_points - translation)
 
     def solve_callback(self, h_rgb: Image, h_depth: Image, e_rgb: Image, e_depth: Image):
         from scipy.spatial.transform import Rotation as R
@@ -390,19 +371,14 @@ class ExtrinsicSolverNode(Node):
                         float(np.percentile(e_conf_orig, 95)),
                     )
 
-                # Publish VGGT world geometry, using raw depth only to reject bad pixels.
+                # Stage VGGT geometry. It is published after the matching
+                # camera-optical-to-link transform has been resolved.
                 h_raw_model = self.preprocess_depth_map(head_dep, h_new_h, h_crop_y)
                 e_raw_model = self.preprocess_depth_map(exo_dep, e_new_h, e_crop_y)
                 h_color = (h_tensor.permute(1, 2, 0).cpu().numpy() * 255.0).astype(np.uint8)
                 e_color = (e_tensor.permute(1, 2, 0).cpu().numpy() * 255.0).astype(np.uint8)
-                self.publish_vggt_pointcloud(
-                    h_raw_model, e_raw_model, h_color, e_color,
-                    h_pred_depth, e_pred_depth, h_conf, e_conf,
-                    E_head_scaled, E_exo_scaled,
-                    intrinsic[0, 2 * M - 2].cpu().float().numpy(),
-                    intrinsic[0, 2 * M - 1].cpu().float().numpy(),
-                    scale, e_rgb.header.stamp
-                )
+                h_intrinsic = intrinsic[0, 2 * M - 2].cpu().float().numpy()
+                e_intrinsic = intrinsic[0, 2 * M - 1].cpu().float().numpy()
 
                 # Compute relative extrinsic camera pose (in optical frames)
                 T_head = np.eye(4)
@@ -434,8 +410,17 @@ class ExtrinsicSolverNode(Node):
                     new_q = R.from_matrix(T_exo_link_from_head_link[:3, :3]).as_quat()
 
                     T_exo_link_from_vggt_world = T_exo_link_from_exo_opt @ T_exo
-                    new_vggt_t = T_exo_link_from_vggt_world[:3, 3]
-                    new_vggt_q = R.from_matrix(T_exo_link_from_vggt_world[:3, :3]).as_quat()
+                    if not np.isfinite(T_exo_link_from_vggt_world).all():
+                        raise ValueError("VGGT world-to-exo transform contains non-finite values")
+
+                    self.publish_vggt_pointcloud(
+                        h_raw_model, e_raw_model, h_color, e_color,
+                        h_pred_depth, e_pred_depth, h_conf, e_conf,
+                        E_head_scaled, E_exo_scaled,
+                        h_intrinsic, e_intrinsic,
+                        T_exo_link_from_vggt_world,
+                        scale, e_rgb.header.stamp
+                    )
 
                     valid_tf = True
                     dist = np.linalg.norm(new_t)
@@ -483,20 +468,12 @@ class ExtrinsicSolverNode(Node):
                         if self.last_solver_time is None:
                             self.current_t = new_t
                             self.current_q = new_q
-                            self.current_vggt_world_t = new_vggt_t
-                            self.current_vggt_world_q = new_vggt_q
                         else:
                             self.current_t = (1.0 - self.tf_filter_alpha) * self.current_t + self.tf_filter_alpha * new_t
                             if np.dot(self.current_q, new_q) < 0:
                                 new_q = -new_q
                             self.current_q = (1.0 - self.tf_filter_alpha) * self.current_q + self.tf_filter_alpha * new_q
                             self.current_q /= np.linalg.norm(self.current_q)
-
-                            self.current_vggt_world_t = (1.0 - self.tf_filter_alpha) * self.current_vggt_world_t + self.tf_filter_alpha * new_vggt_t
-                            if np.dot(self.current_vggt_world_q, new_vggt_q) < 0:
-                                new_vggt_q = -new_vggt_q
-                            self.current_vggt_world_q = (1.0 - self.tf_filter_alpha) * self.current_vggt_world_q + self.tf_filter_alpha * new_vggt_q
-                            self.current_vggt_world_q /= np.linalg.norm(self.current_vggt_world_q)
 
                         self.get_logger().info(
                             f"Updated TF: t=[{self.current_t[0]:.3f}, {self.current_t[1]:.3f}, {self.current_t[2]:.3f}] "
@@ -531,15 +508,13 @@ class ExtrinsicSolverNode(Node):
         # Always broadcast the last known good transforms to keep TF tree active
         if self.current_t is not None:
             self.broadcast_transform(e_rgb.header.stamp)
-        if self.current_vggt_world_t is not None:
-            self.broadcast_vggt_world_transform(e_rgb.header.stamp)
         if self.device == "cuda":
             torch.cuda.empty_cache()
 
     def publish_vggt_pointcloud(self, h_raw_depth, e_raw_depth, h_color, e_color,
                                 h_pred_depth, e_pred_depth, h_conf, e_conf,
                                 h_extrinsic, e_extrinsic, h_intrinsic, e_intrinsic,
-                                scale, stamp):
+                                output_from_vggt_world, scale, stamp):
         h_depth_scaled = h_pred_depth * scale
         e_depth_scaled = e_pred_depth * scale
         h_conf_mask = self._conf_mask(h_conf)
@@ -563,8 +538,8 @@ class ExtrinsicSolverNode(Node):
             h_valid = h_valid & (~h_raw_valid | (np.abs(h_depth_scaled - h_raw_depth) <= self.pcl_max_depth_residual))
             e_valid = e_valid & (~e_raw_valid | (np.abs(e_depth_scaled - e_raw_depth) <= self.pcl_max_depth_residual))
 
-        h_pts = self.unproject_depth_np(h_depth_scaled, h_extrinsic, h_intrinsic)
-        e_pts = self.unproject_depth_np(e_depth_scaled, e_extrinsic, e_intrinsic)
+        h_pts = unproject_depth_np(h_depth_scaled, h_extrinsic, h_intrinsic)
+        e_pts = unproject_depth_np(e_depth_scaled, e_extrinsic, e_intrinsic)
 
         h_pts_valid = h_pts[h_valid]
         h_color_valid = h_color[h_valid]
@@ -577,6 +552,8 @@ class ExtrinsicSolverNode(Node):
 
         all_pts = np.vstack([h_pts_valid, e_pts_valid])
         all_color = np.vstack([h_color_valid, e_color_valid])
+
+        all_pts = transform_points(all_pts, output_from_vggt_world)
 
         # Downsample to avoid ROS network bottlenecks
         downsample_factor = 2
@@ -601,7 +578,7 @@ class ExtrinsicSolverNode(Node):
         data['rgb'] = rgb_packed
 
         pcl_msg = PointCloud2()
-        pcl_msg.header.frame_id = 'vggt_world'
+        pcl_msg.header.frame_id = self.exo_frame_id
         pcl_msg.header.stamp = stamp
         pcl_msg.height = 1
         pcl_msg.width = num_points
@@ -618,7 +595,7 @@ class ExtrinsicSolverNode(Node):
         pcl_msg.data = data.tobytes()
 
         self.vggt_pcl_pub.publish(pcl_msg)
-        self.get_logger().info(f"Published VGGT world point cloud: {num_points} points")
+        self.get_logger().info(f"Published VGGT point cloud in {self.exo_frame_id}: {num_points} points")
 
     def broadcast_transform(self, stamp):
         if self.current_t is None or self.current_q is None:
@@ -637,26 +614,6 @@ class ExtrinsicSolverNode(Node):
         t_msg.transform.rotation.y = float(self.current_q[1])
         t_msg.transform.rotation.z = float(self.current_q[2])
         t_msg.transform.rotation.w = float(self.current_q[3])
-
-        self.tf_broadcaster.sendTransform(t_msg)
-
-    def broadcast_vggt_world_transform(self, stamp):
-        if self.current_vggt_world_t is None or self.current_vggt_world_q is None:
-            return
-
-        t_msg = TransformStamped()
-        t_msg.header.stamp = stamp
-        t_msg.header.frame_id = self.exo_frame_id
-        t_msg.child_frame_id = 'vggt_world'
-
-        t_msg.transform.translation.x = float(self.current_vggt_world_t[0])
-        t_msg.transform.translation.y = float(self.current_vggt_world_t[1])
-        t_msg.transform.translation.z = float(self.current_vggt_world_t[2])
-
-        t_msg.transform.rotation.x = float(self.current_vggt_world_q[0])
-        t_msg.transform.rotation.y = float(self.current_vggt_world_q[1])
-        t_msg.transform.rotation.z = float(self.current_vggt_world_q[2])
-        t_msg.transform.rotation.w = float(self.current_vggt_world_q[3])
 
         self.tf_broadcaster.sendTransform(t_msg)
 

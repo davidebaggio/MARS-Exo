@@ -9,18 +9,28 @@ extrinsic_solver:
     tf_filter_alpha: 0.5
     sliding_window_size: 4
     # VGGT depth-head confidence gating
-    depth_conf_mode: "percentile"        # "percentile" | "absolute"
-    depth_conf_percentile: 25.0        # drop bottom N% of pixels by conf when mode=percentile
-    depth_conf_absolute: 1.5            # conf threshold when mode=absolute (range is (1, +inf))
-    conf_gate_combine: true             # gate raw+VGGT depth fill by conf mask
-    conf_filter_pointcloud: true        # percentile-filter /vggt/combined_pointcloud
-    pcl_require_raw_support: false      # keep VGGT cloud dense; raw depth only rejects bad pixels
-    pcl_max_depth_residual: 0.25        # drop raw pixels where scaled VGGT depth disagrees by > meters
+    depth_conf_mode: "percentile" # "percentile" | "absolute"
+    depth_conf_percentile: 25.0 # drop bottom N% of pixels by conf when mode=percentile
+    depth_conf_absolute: 1.5 # conf threshold when mode=absolute (range is (1, +inf))
+    conf_gate_combine: true # gate raw+VGGT depth fill by conf mask
+    conf_filter_pointcloud: true # percentile-filter /vggt/combined_pointcloud
+    pcl_require_raw_support: false # keep VGGT cloud dense; raw depth only rejects bad pixels
+    pcl_max_depth_residual: 0.25 # drop raw pixels where scaled VGGT depth disagrees by > meters
     # Metrics
     metrics_enabled: true
     metrics_csv_path: "extrinsic_metrics.csv"
     gt_parent_frame: ""
     gt_child_frame: ""
+
+cloud_map_evaluator:
+  ros__parameters:
+    vggt_cloud_topic: "/vggt/combined_pointcloud"
+    ground_truth_cloud_topic: "/ground_truth/visible_cloud"
+    ground_truth_odom_topic: "/exoskeleton/odom"
+    voxel_size: 0.1
+    fscore_threshold: 0.1
+    waist_to_exo_translation: [0.07, 0.0, 0.0]
+    waist_to_exo_pitch_deg: 0.0
 
 map_assembler:
   ros__parameters:

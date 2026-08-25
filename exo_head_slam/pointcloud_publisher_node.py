@@ -31,14 +31,11 @@ class PointCloudPublisherNode(Node):
 
         # Sync subscribers
         self.rgb_sub = message_filters.Subscriber(
-            self, Image, self.input_rgb_topic, qos_profile=qos_profile_sensor_data
-        )
+            self, Image, self.input_rgb_topic, qos_profile=qos_profile_sensor_data)
         self.depth_sub = message_filters.Subscriber(
-            self, Image, self.input_depth_topic, qos_profile=qos_profile_sensor_data
-        )
+            self, Image, self.input_depth_topic, qos_profile=qos_profile_sensor_data)
         self.info_sub = message_filters.Subscriber(
-            self, CameraInfo, self.input_camera_info_topic, qos_profile=qos_profile_sensor_data
-        )
+            self, CameraInfo, self.input_camera_info_topic, qos_profile=qos_profile_sensor_data)
 
         # Track raw message arrivals
         self.rgb_sub.registerCallback(lambda _: self._count_msg('rgb'))

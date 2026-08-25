@@ -5,7 +5,7 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
-from launch.substitutions import PathJoinSubstitution, LaunchConfiguration
+from launch.substitutions import PathJoinSubstitution, LaunchConfiguration, PythonExpression
 from launch_ros.substitutions import FindPackageShare
 from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
@@ -51,25 +51,29 @@ def generate_launch_description():
     )
     metrics_csv_path = LaunchConfiguration('metrics_csv_path')
 
+    cloud_metrics_csv_path_arg = DeclareLaunchArgument(
+        'cloud_metrics_csv_path',
+        default_value='cloud_metrics.csv',
+        description='Path to the visible-cloud evaluation CSV file'
+    )
+    cloud_metrics_csv_path = LaunchConfiguration('cloud_metrics_csv_path')
+
+    evaluate_cloud_map_arg = DeclareLaunchArgument(
+        'evaluate_cloud_map',
+        default_value='false',
+        description='Evaluate VGGT clouds against synchronized GT visible clouds'
+    )
+    evaluate_cloud_map = LaunchConfiguration('evaluate_cloud_map')
+
     gt_parent_frame_arg = DeclareLaunchArgument('gt_parent_frame', default_value='')
     gt_parent_frame = LaunchConfiguration('gt_parent_frame')
     gt_child_frame_arg = DeclareLaunchArgument('gt_child_frame', default_value='')
     gt_child_frame = LaunchConfiguration('gt_child_frame')
-    gt_tf_static_topic_arg = DeclareLaunchArgument('gt_tf_static_topic', default_value='')
-    gt_tf_static_topic = LaunchConfiguration('gt_tf_static_topic')
 
-    evaluation_enabled_arg = DeclareLaunchArgument(
-        'evaluation_enabled',
-        default_value='false',
-        description='Run trajectory and map benchmark evaluator'
-    )
-    evaluation_enabled = LaunchConfiguration('evaluation_enabled')
-    benchmark_output_prefix_arg = DeclareLaunchArgument(
-        'benchmark_output_prefix',
-        default_value='metrics/eval/benchmark',
-        description='Benchmark output path without extension'
-    )
-    benchmark_output_prefix = LaunchConfiguration('benchmark_output_prefix')
+    exo_pitch_deg_arg = DeclareLaunchArgument('exo_pitch_deg', default_value='0')
+    exo_pitch_deg = LaunchConfiguration('exo_pitch_deg')
+    head_pitch_deg_arg = DeclareLaunchArgument('head_pitch_deg', default_value='0')
+    head_pitch_deg = LaunchConfiguration('head_pitch_deg')
 
     use_imu_arg = DeclareLaunchArgument(
         'use_imu',
@@ -98,6 +102,13 @@ def generate_launch_description():
         description='Initial map height in the RViz ground frame, meters'
     )
     map_start_z = LaunchConfiguration('map_start_z')
+
+    exoskeleton_dataset_arg = DeclareLaunchArgument(
+        'exoskeleton_dataset',
+        default_value='false',
+        description='Use frame adapters for the exoskeleton_dataset bag'
+    )
+    exoskeleton_dataset = LaunchConfiguration('exoskeleton_dataset')
 
     common_params = {'use_sim_time': use_sim_time}
 
@@ -142,17 +153,22 @@ def generate_launch_description():
         package='exo_head_slam',
         executable='extrinsic_solver',
         name='extrinsic_solver',
-        parameters=[
-            common_config,
-            exo_config,
-            common_params,
-            {
-                'metrics_csv_path': metrics_csv_path,
-                'gt_parent_frame': gt_parent_frame,
-                'gt_child_frame': gt_child_frame,
-                'gt_tf_static_topic': gt_tf_static_topic,
-            },
-        ],
+        parameters=[common_config, exo_config, common_params, {
+            'metrics_csv_path': metrics_csv_path,
+            'gt_parent_frame': gt_parent_frame,
+            'gt_child_frame': gt_child_frame,
+        }],
+    )
+
+    cloud_map_evaluator = Node(
+        package='exo_head_slam',
+        executable='cloud_map_evaluator',
+        name='cloud_map_evaluator',
+        parameters=[common_config, common_params, {
+            'metrics_csv_path': cloud_metrics_csv_path,
+            'waist_to_exo_pitch_deg': ParameterValue(exo_pitch_deg, value_type=float),
+        }],
+        condition=IfCondition(evaluate_cloud_map),
     )
 
     # Debug PointCloud Publishers
@@ -246,20 +262,59 @@ def generate_launch_description():
         depth_unit_scale_arg,
         publish_debug_pcl_arg,
         metrics_csv_path_arg,
+        cloud_metrics_csv_path_arg,
+        evaluate_cloud_map_arg,
         gt_parent_frame_arg,
         gt_child_frame_arg,
-        gt_tf_static_topic_arg,
-        evaluation_enabled_arg,
-        benchmark_output_prefix_arg,
+        exo_pitch_deg_arg,
+        head_pitch_deg_arg,
         use_imu_arg,
         imu_topic_arg,
         filtered_imu_topic_arg,
         map_start_z_arg,
+        exoskeleton_dataset_arg,
     ]
 
+    # The dataset uses camera-link names while the pipeline owns exo_link/head_link.
+    for name, parent, child, translation, quaternion in (
+        ('exo_color_tf', 'exo_link', 'front_camera_color_optical_frame', ('0', '0', '0'), ('0.5', '-0.5', '0.5', '-0.5')),
+        ('exo_imu_tf', 'exo_link', 'front_camera_imu_frame', ('0', '0', '0'), ('0', '0', '0', '1')),
+        ('head_color_tf', 'head_link', 'head_camera_color_optical_frame', ('0', '0', '0'), ('0.5', '-0.5', '0.5', '-0.5')),
+    ):
+        actions.append(Node(
+            package='tf2_ros',
+            executable='static_transform_publisher',
+            name=name,
+            arguments=[
+                '--x', translation[0], '--y', translation[1], '--z', translation[2],
+                '--qx', quaternion[0], '--qy', quaternion[1],
+                '--qz', quaternion[2], '--qw', quaternion[3],
+                '--frame-id', parent, '--child-frame-id', child,
+            ],
+            condition=IfCondition(exoskeleton_dataset),
+        ))
+
+    for name, child, translation, pitch_deg in (
+        ('gt_exo_tf', 'gt_exo_link', ('0.07', '0', '0'), exo_pitch_deg),
+        ('gt_head_tf', 'gt_head_link', ('0.07', '0', '0.75'), head_pitch_deg),
+    ):
+        actions.append(Node(
+            package='tf2_ros',
+            executable='static_transform_publisher',
+            name=name,
+            arguments=[
+                '--x', translation[0], '--y', translation[1], '--z', translation[2],
+                '--roll', '0',
+                '--pitch', PythonExpression([pitch_deg, ' * 0.017453292519943295']),
+                '--yaw', '0',
+                '--frame-id', 'gt_waist_link', '--child-frame-id', child,
+            ],
+            condition=IfCondition(exoskeleton_dataset),
+        ))
+
     try:
-        get_package_share_directory('rtabmap_slam')
-        get_package_share_directory('rtabmap_odom')
+        for required_package in ('rtabmap_slam', 'rtabmap_odom', 'rtabmap_util'):
+            get_package_share_directory(required_package)
         actions.append(
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
@@ -275,7 +330,7 @@ def generate_launch_description():
             )
         )
     except PackageNotFoundError:
-        actions.append(LogInfo(msg='rtabmap_slam or rtabmap_odom not found, skipping RTAB-Map launch.'))
+        actions.append(LogInfo(msg='Required RTAB-Map packages not found, skipping RTAB-Map launch.'))
 
     actions.extend([
         head_depth_preprocessor,
@@ -283,6 +338,7 @@ def generate_launch_description():
         head_masker,
         exo_masker,
         extrinsic_solver,
+        cloud_map_evaluator,
         head_pcl_pub,
         exo_pcl_pub,
         *dataset_static_transforms,

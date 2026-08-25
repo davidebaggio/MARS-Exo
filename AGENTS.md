@@ -2,7 +2,7 @@
 
 ## Project
 
-ROS 2 ament_python package — multi-agent RGB-D SLAM pipeline for head + exoskeleton cameras. Master thesis project. No tests, no CI.
+ROS 2 ament_python package — multi-agent RGB-D SLAM pipeline for head + exoskeleton cameras. Master thesis project. One focused helper test, no CI.
 
 ## Build & Run
 
@@ -25,6 +25,7 @@ After `colcon build`, the generated shim scripts in `install/exo_head_slam/lib/e
 | `semantic_masker` | `semantic_masker_node.py` | YOLOv8-seg dynamic object removal |
 | `extrinsic_solver` | `extrinsic_solver_node.py` | VGGT-1B joint extrinsic + depth estimation, with depth-head confidence gating |
 | `pointcloud_publisher` | `pointcloud_publisher_node.py` | Debug per-camera XYZRGB PointCloud2 from RGB-D (behind `publish_debug_pcl` flag) |
+| `cloud_map_evaluator` | `cloud_map_evaluator_node.py` | Per-frame VGGT evaluation against `/ground_truth/visible_cloud` |
 
 ## Launch
 
@@ -53,6 +54,8 @@ Head RGB + depth → depth_preprocessor → semantic_masker ─┐
                                                           ├─ extrinsic_solver (VGGT-1B) → TF exo_link→head_link, vggt_world
 Exo RGB + depth  → depth_preprocessor → semantic_masker ─┘                                  ↘ combined depth fills, /vggt/combined_pointcloud
 
+/vggt/combined_pointcloud + /exoskeleton/odom → cloud_map_evaluator ← /ground_truth/visible_cloud
+
 RTAB-Map + rgbd_odometry (exo) → static TF map→odom + dynamic TF odom→exo_link → exo_rtabmap/cloud_map + /map (optional)
 ```
 
@@ -66,5 +69,6 @@ VGGT depth-head confidence (`depth_conf`, range `(1, +inf)`) gates:
 - `model.depth_head(...)` returns `(depth_map, depth_conf)`; the project does NOT use `model.point_head`.
 - `build/`, `install/`, `log/` are colcon artifacts, gitignored
 - `*.pt` and `*.engine` model files are gitignored — `yolov8n-seg.pt` must be placed in repo root manually
-- Bag playback defaults to `data/rosbag2_2026_06_11-15_34_13/rosbag2_2026_06_11-15_34_13_0.mcap` (run.sh), played at 0.3x
+- Bag playback defaults to the configured `DEFAULT_BAG` in `run.sh`, played at 0.3x
+- Exoskeleton bag suffix `x_y_z` means bag order, exo-camera pitch (degrees), head-camera pitch (degrees); `run.sh` parses the pitches for GT evaluation.
 - RGB and depth must already be published and aligned by an upstream camera stack; this package does not capture or align them

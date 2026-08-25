@@ -17,7 +17,8 @@ def main():
         csv_path = sys.argv[1]
     else:
         import glob
-        files = glob.glob('metrics/pipeline/metrics_*.csv')
+        files = [path for path in glob.glob('metrics/pipeline/metrics_*.csv')
+                 if not path.endswith('_cloud.csv')]
         if files:
             files.sort()
             csv_path = files[-1]
@@ -43,6 +44,8 @@ def main():
 
     csv_basename = os.path.basename(csv_path)
     csv_name_no_ext = os.path.splitext(csv_basename)[0]
+    cloud_csv_path = f'{os.path.splitext(csv_path)[0]}_cloud.csv'
+    cloud_df = pd.read_csv(cloud_csv_path) if os.path.exists(cloud_csv_path) else None
 
     eval_dir = 'metrics/eval'
     os.makedirs(eval_dir, exist_ok=True)
@@ -54,7 +57,7 @@ def main():
     time_sec = df['timestamp'] - t_start
 
     fig, axs = plt.subplots(4, 2, figsize=(14, 20))
-    fig.suptitle('VGGT-1B Calibration & Depth Estimation Evaluation Metrics', fontsize=16, fontweight='bold')
+    fig.suptitle('VGGT-Omega Calibration & Depth Estimation Evaluation Metrics', fontsize=16, fontweight='bold')
 
     # 1. VGGT Depth Scale Alignment
     ax = axs[0, 0]
@@ -309,6 +312,24 @@ def main():
             summary_lines.append("")
     else:
         summary_lines.append("No successful frames to compute extrinsics statistics.")
+
+    if cloud_df is not None and not cloud_df.empty:
+        cloud = cloud_df.mean(numeric_only=True)
+        summary_lines.extend([
+            "",
+            "-----------------------------------------",
+            "VGGT VISIBLE CLOUD VS GROUND TRUTH",
+            "-----------------------------------------",
+            f"Cloud Metrics CSV: {cloud_csv_path}",
+            f"Synchronized Frames: {len(cloud_df)}",
+            f"Voxel Size:        {cloud['voxel_size']:>8.4f} m",
+            f"Accuracy Mean:     {cloud['accuracy_mean']:>8.4f} m",
+            f"Accuracy RMSE:     {cloud['accuracy_rmse']:>8.4f} m",
+            f"Completeness Mean: {cloud['completeness_mean']:>8.4f} m",
+            f"Completeness RMSE: {cloud['completeness_rmse']:>8.4f} m",
+            f"Chamfer Distance:  {cloud['chamfer']:>8.4f} m",
+            f"F-score:           {cloud['fscore']:>8.4f}",
+        ])
 
     try:
         with open(output_text, 'w') as f:
