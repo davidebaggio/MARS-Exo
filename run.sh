@@ -102,11 +102,7 @@ fi
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 mkdir -p metrics/pipeline
 METRICS_CSV="metrics/pipeline/metrics_${TIMESTAMP}.csv"
-<<<<<<< HEAD
-BENCHMARK_PREFIX="metrics/eval/benchmark_${TIMESTAMP}"
-=======
 CLOUD_METRICS_CSV="${METRICS_CSV%.csv}_cloud.csv"
->>>>>>> 8a94f28
 echo "Logging metrics to: $METRICS_CSV"
 
 # fastcdr 2.2.5 needs the local compatibility shim. Current Jazzy releases do not.
@@ -120,50 +116,7 @@ if [[ -n "$FASTCDR_VERSION" ]] && dpkg --compare-versions "$FASTCDR_VERSION" lt 
 	export LD_PRELOAD="$(realpath lib/libfastcdr_compat.so)${LD_PRELOAD:+:$LD_PRELOAD}"
 fi
 
-BAG_INFO="$(ros2 bag info "$BAG_PATH" 2>/dev/null)"
 USE_IMU=false
-<<<<<<< HEAD
-if grep -q 'Topic: /camera/exo/imu | Type: sensor_msgs/msg/Imu' <<<"$BAG_INFO"; then
-	USE_IMU=true
-fi
-echo "RTAB-Map IMU leveling: $USE_IMU"
-
-DATASET_MODE=false
-DEPTH_UNIT_SCALE=0.001
-EVALUATION_ENABLED=false
-GT_PARENT_FRAME=""
-GT_CHILD_FRAME=""
-GT_TF_STATIC_TOPIC=""
-if grep -q 'Topic: /ground_truth/global_map' <<<"$BAG_INFO"; then
-	DATASET_MODE=true
-	DEPTH_UNIT_SCALE=1.0
-	EVALUATION_ENABLED=true
-	GT_PARENT_FRAME="front_camera_link"
-	GT_CHILD_FRAME="head_camera_link"
-	GT_TF_STATIC_TOPIC="/ground_truth/tf_static"
-	echo "Detected exoskeleton_dataset: enabling GT benchmark"
-fi
-
-LAUNCH_ARGS=(
-	use_sim_time:=true
-	publish_debug_pcl:=true
-	metrics_csv_path:="$METRICS_CSV"
-	benchmark_output_prefix:="$BENCHMARK_PREFIX"
-	dataset_mode:="$DATASET_MODE"
-	depth_unit_scale:="$DEPTH_UNIT_SCALE"
-	evaluation_enabled:="$EVALUATION_ENABLED"
-	use_imu:="$USE_IMU"
-	imu_topic:=/camera/exo/imu
-)
-if [[ "$DATASET_MODE" == true ]]; then
-	LAUNCH_ARGS+=(
-		gt_parent_frame:="$GT_PARENT_FRAME"
-		gt_child_frame:="$GT_CHILD_FRAME"
-		gt_tf_static_topic:="$GT_TF_STATIC_TOPIC"
-	)
-fi
-ros2 launch exo_head_slam main_pipeline_launch.py "${LAUNCH_ARGS[@]}" &
-=======
 if ros2 bag info "$BAG_PATH" 2>/dev/null | grep -q 'Topic: /camera/exo/imu | Type: sensor_msgs/msg/Imu'; then
 	if ros2 pkg prefix imu_filter_madgwick >/dev/null 2>&1; then
 		USE_IMU=true
@@ -180,21 +133,11 @@ if ros2 bag info "$BAG_PATH" 2>/dev/null | grep -q 'Topic: /ground_truth/visible
 fi
 
 ros2 launch exo_head_slam main_pipeline_launch.py use_sim_time:=true publish_debug_pcl:=true metrics_csv_path:="$METRICS_CSV" cloud_metrics_csv_path:="$CLOUD_METRICS_CSV" evaluate_cloud_map:="$EVALUATE_CLOUD_MAP" exo_pitch_deg:="$EXO_PITCH_DEG" head_pitch_deg:="$HEAD_PITCH_DEG" use_imu:="$USE_IMU" imu_topic:=/camera/exo/imu exoskeleton_dataset:="$EXOSKELETON_DATASET" "${GT_LAUNCH_ARGS[@]}" &
->>>>>>> 8a94f28
 PIPELINE_PID=$!
 
 wait_for_pipeline
 
 echo "Starting bag playback: $BAG_PATH"
-<<<<<<< HEAD
-PLAY_ARGS=(-i "$BAG_PATH" mcap --rate 0.3 --disable-keyboard-controls --clock)
-if [[ "$DATASET_MODE" == true ]]; then
-	PLAY_ARGS+=(--remap /tf:=/ground_truth/tf /tf_static:=/ground_truth/tf_static)
-else
-	PLAY_ARGS+=(--loop)
-fi
-ros2 bag play "${PLAY_ARGS[@]}" &
-=======
 PLAY_REMAP=()
 if [[ "$EXOSKELETON_DATASET" == true ]]; then
 	# Avoid duplicate parents; the launch file republishes only the camera transforms it needs.
@@ -202,21 +145,10 @@ if [[ "$EXOSKELETON_DATASET" == true ]]; then
 fi
 ros2 bag play -i "$BAG_PATH" mcap --loop --rate 0.3 --disable-keyboard-controls --clock "${PLAY_REMAP[@]}" &
      #--remap /tf:=/tf_old /tf_static:=/tf_static_old &
->>>>>>> 8a94f28
 BAG_PID=$!
 
 # Launch RViz with pre-configured displays
 rviz2 -d "$(ros2 pkg prefix exo_head_slam)/share/exo_head_slam/rviz/pipeline.rviz" --ros-args -p use_sim_time:=true &
 RVIZ_PID=$!
-
-if [[ "$DATASET_MODE" == true ]]; then
-	wait "$BAG_PID"
-	sleep 5
-	timeout 15 ros2 service call \
-		/benchmark_evaluator/finalize std_srvs/srv/Trigger "{}"
-	python3 plot_metrics.py "$METRICS_CSV"
-	echo "Benchmark summary: ${BENCHMARK_PREFIX}.json"
-	exit 0
-fi
 
 wait "$PIPELINE_PID"

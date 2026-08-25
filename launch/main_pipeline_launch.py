@@ -23,20 +23,6 @@ def generate_launch_description():
     )
     use_sim_time = LaunchConfiguration('use_sim_time')
 
-    dataset_mode_arg = DeclareLaunchArgument(
-        'dataset_mode',
-        default_value='false',
-        description='Enable exoskeleton_dataset frame isolation and evaluation'
-    )
-    dataset_mode = LaunchConfiguration('dataset_mode')
-
-    depth_unit_scale_arg = DeclareLaunchArgument(
-        'depth_unit_scale',
-        default_value='0.001',
-        description='Scale applied to incoming depth values'
-    )
-    depth_unit_scale = LaunchConfiguration('depth_unit_scale')
-
     publish_debug_pcl_arg = DeclareLaunchArgument(
         'publish_debug_pcl',
         default_value='true',
@@ -116,20 +102,14 @@ def generate_launch_description():
         package='exo_head_slam',
         executable='depth_preprocessor',
         name='head_depth_preprocessor',
-        parameters=[
-            head_config, common_params,
-            {'depth_filter.depth_unit_scale': depth_unit_scale},
-        ],
+        parameters=[head_config, common_params],
     )
 
     exo_depth_preprocessor = Node(
         package='exo_head_slam',
         executable='depth_preprocessor',
         name='exo_depth_preprocessor',
-        parameters=[
-            exo_config, common_params,
-            {'depth_filter.depth_unit_scale': depth_unit_scale},
-        ],
+        parameters=[exo_config, common_params],
     )
     
     # Head Masker
@@ -202,64 +182,10 @@ def generate_launch_description():
         condition=IfCondition(publish_debug_pcl)
     )
 
-    dataset_static_transforms = [
-        Node(
-            package='tf2_ros',
-            executable='static_transform_publisher',
-            name='dataset_exo_optical_tf',
-            arguments=[
-                '--x', '0', '--y', '0', '--z', '0',
-                '--qx', '0.5', '--qy', '-0.5', '--qz', '0.5', '--qw', '-0.5',
-                '--frame-id', 'exo_link',
-                '--child-frame-id', 'front_camera_color_optical_frame',
-            ],
-            condition=IfCondition(dataset_mode),
-        ),
-        Node(
-            package='tf2_ros',
-            executable='static_transform_publisher',
-            name='dataset_exo_imu_tf',
-            arguments=[
-                '--frame-id', 'exo_link',
-                '--child-frame-id', 'front_camera_imu_frame',
-            ],
-            condition=IfCondition(dataset_mode),
-        ),
-        Node(
-            package='tf2_ros',
-            executable='static_transform_publisher',
-            name='dataset_head_optical_tf',
-            arguments=[
-                '--x', '0', '--y', '0', '--z', '0',
-                '--qx', '0.5', '--qy', '-0.5', '--qz', '0.5', '--qw', '-0.5',
-                '--frame-id', 'head_link',
-                '--child-frame-id', 'head_camera_color_optical_frame',
-            ],
-            condition=IfCondition(dataset_mode),
-        ),
-    ]
-
-    benchmark_evaluator = Node(
-        package='exo_head_slam',
-        executable='benchmark_evaluator',
-        name='benchmark_evaluator',
-        parameters=[
-            common_params,
-            {
-                'output_prefix': benchmark_output_prefix,
-                'map_start_z': ParameterValue(map_start_z, value_type=float),
-            },
-        ],
-        condition=IfCondition(evaluation_enabled),
-        output='screen',
-    )
-
     # Start RTAB-Map early so it initializes before data flows (service ready
     # by the time map_assembler fires after its 5s TimerAction delay).
     actions = [
         use_sim_time_arg,
-        dataset_mode_arg,
-        depth_unit_scale_arg,
         publish_debug_pcl_arg,
         metrics_csv_path_arg,
         cloud_metrics_csv_path_arg,
@@ -341,8 +267,6 @@ def generate_launch_description():
         cloud_map_evaluator,
         head_pcl_pub,
         exo_pcl_pub,
-        *dataset_static_transforms,
-        benchmark_evaluator,
     ])
 
     return LaunchDescription(actions)
