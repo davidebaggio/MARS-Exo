@@ -18,12 +18,11 @@ exo_rtabmap:
     odom_frame_id: "odom"
     publish_tf: true            # launch assigns odom->exo_link to odometry and map->odom to RTAB-Map
     approx_sync: true
-    approx_sync_max_interval: 0.02
-    queue_size: 100
+    approx_sync_max_interval: 0.1
     sync_queue_size: 100
     wait_for_transform: 0.5
-    rgb_topic: "/exo/masked/image_raw"
-    depth_topic: "/exo/masked/depth_raw"
+    rgb_topic: "/camera/exo/color/image_raw"
+    depth_topic: "/exo/filtered/depth_raw"
     camera_info_topic: "/camera/exo/color/camera_info"
     RGBD/CreateOccupancyGrid: "true"
     Grid/FromDepth: "true"
@@ -33,7 +32,7 @@ exo_rtabmap:
     Odom/ResetCountdown: "3" # reinitialize after three consecutive registration failures
     OdomF2M/BundleAdjustment: "0" # avoid BA dropping otherwise usable low-inlier frames
     Vis/EstimationType: "0" # 3D->3D
-    Vis/MinInliers: "4"
+    Vis/MinInliers: "8"
     Vis/InlierDistance: "0.1"
     Vis/CorGuessWinSize: "0"
     Vis/FeatureType: "8" # GFTT/ORB

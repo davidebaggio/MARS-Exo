@@ -11,7 +11,7 @@ make build
 source install/setup.bash
 ```
 
-**Or use `run.sh`** — builds, sources, launches the pipeline, and plays a rosbag at 0.3x loop. Accepts an optional bag path argument.
+**Or use `run.sh`** — builds, sources, launches the pipeline, and plays a rosbag once at 0.3x. IMU, debug point clouds, looping, and playback rate are opt-in/configurable flags; an optional bag path may follow them.
 
 ### Critical: Python shebang fix
 
@@ -71,6 +71,6 @@ VGGT depth-head confidence (`depth_conf`, range `(1, +inf)`) gates:
 - `model.depth_head(...)` returns `(depth_map, depth_conf)`; the project does NOT use `model.point_head`.
 - `build/`, `install/`, `log/` are colcon artifacts, gitignored
 - `*.pt` and `*.engine` model files are gitignored — `yolov8n-seg.pt` must be placed in repo root manually
-- Bag playback defaults to the configured `DEFAULT_BAG` in `run.sh`, played at 0.3x
+- Bag playback defaults to the configured `DEFAULT_BAG` in `run.sh`, played once at 0.3x; use `--rate`, `--imu`, `--debug-pcl`, or `--loop` to override runtime behavior
 - Exoskeleton bag suffix `x_y_z` means bag order, exo-camera pitch (degrees), head-camera pitch (degrees); `run.sh` parses the pitches for GT evaluation.
 - RGB and depth must already be published and aligned by an upstream camera stack; this package does not capture or align them

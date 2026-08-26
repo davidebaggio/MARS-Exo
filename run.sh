@@ -3,12 +3,70 @@ set -euo pipefail
 
 #DEFAULT_BAG="data/rosbag2_2026_06_11-15_25_14/rosbag2_2026_06_11-15_25_14_0.mcap"
 #DEFAULT_BAG="data/rosbag2_2026_06_11-15_31_00/rosbag2_2026_06_11-15_31_00_0.mcap"
-#DEFAULT_BAG="data/rosbag2_2026_06_11-15_34_13/rosbag2_2026_06_11-15_34_13_0.mcap"
+DEFAULT_BAG="data/rosbag2_2026_06_11-15_34_13/rosbag2_2026_06_11-15_34_13_0.mcap"
 #DEFAULT_BAG="data/exoskeleton_dataset_0_0_0/exoskeleton_dataset_0_0_0.mcap"
-DEFAULT_BAG="data/exoskeleton_dataset_1_20_35/exoskeleton_dataset_1_20_35.mcap"
+#DEFAULT_BAG="data/exoskeleton_dataset_1_20_35/exoskeleton_dataset_1_20_35.mcap"
 #DEFAULT_BAG="data/exoskeleton_dataset_2_10_40/exoskeleton_dataset_2_10_40.mcap"
 
-BAG_PATH="${1:-$DEFAULT_BAG}"
+PLAYBACK_RATE=0.6
+USE_IMU=true
+PUBLISH_DEBUG_PCL=false
+LOOP_PLAYBACK=false
+BAG_PATH=""
+
+usage() {
+	echo "Usage: $0 [--rate RATE] [--imu] [--debug-pcl] [--loop] [bag_path]"
+}
+
+while (( $# > 0 )); do
+	case "$1" in
+		--rate)
+			if (( $# < 2 )); then
+				echo "--rate requires a value" >&2
+				exit 2
+			fi
+			PLAYBACK_RATE="$2"
+			shift 2
+			;;
+		--imu)
+			USE_IMU=true
+			shift
+			;;
+		--debug-pcl)
+			PUBLISH_DEBUG_PCL=true
+			shift
+			;;
+		--loop)
+			LOOP_PLAYBACK=true
+			shift
+			;;
+		-h|--help)
+			usage
+			exit 0
+			;;
+		--*)
+			echo "Unknown option: $1" >&2
+			usage >&2
+			exit 2
+			;;
+		*)
+			if [[ -n "$BAG_PATH" ]]; then
+				echo "Only one bag path may be provided" >&2
+				exit 2
+			fi
+			BAG_PATH="$1"
+			shift
+			;;
+	esac
+done
+
+if [[ ! "$PLAYBACK_RATE" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]] ||
+	! awk 'BEGIN { exit !(ARGV[1] > 0) }' "$PLAYBACK_RATE"; then
+	echo "Playback rate must be a positive number: $PLAYBACK_RATE" >&2
+	exit 2
+fi
+
+BAG_PATH="${BAG_PATH:-$DEFAULT_BAG}"
 EXOSKELETON_DATASET=false
 GT_LAUNCH_ARGS=()
 EXO_PITCH_DEG=0
@@ -94,9 +152,11 @@ cleanup() {
 }
 
 wait_for_pipeline() {
-	local attempts=30
+	local attempts=180
 	while [[ "$attempts" -gt 0 ]]; do
-		if ros2 node list 2>/dev/null | grep -qE '(/semantic_masker|/extrinsic_solver)'; then
+		# The node name appears while VGGT is still loading. Its masked-image
+		# subscription is created only after the model and pipeline are ready.
+		if ros2 node info /extrinsic_solver 2>/dev/null | grep '/head/masked/image_raw' >/dev/null; then
 			return 0
 		fi
 		attempts=$((attempts - 1))
@@ -144,15 +204,16 @@ if [[ -n "$FASTCDR_VERSION" ]] && dpkg --compare-versions "$FASTCDR_VERSION" lt 
 	export LD_PRELOAD="$(realpath lib/libfastcdr_compat.so)${LD_PRELOAD:+:$LD_PRELOAD}"
 fi
 
-USE_IMU=false
-if ros2 bag info "$BAG_PATH" 2>/dev/null | grep -q 'Topic: /camera/exo/imu | Type: sensor_msgs/msg/Imu'; then
-	if ros2 pkg prefix imu_filter_madgwick >/dev/null 2>&1; then
-		USE_IMU=true
-	else
-		echo "Warning: bag contains IMU data, but imu_filter_madgwick is missing; continuing without IMU." >&2
+if [[ "$USE_IMU" == true ]]; then
+	if ! ros2 bag info "$BAG_PATH" 2>/dev/null | grep -q 'Topic: /camera/exo/imu | Type: sensor_msgs/msg/Imu'; then
+		echo "--imu requested, but the bag has no /camera/exo/imu topic" >&2
+		exit 1
+	fi
+	if ! ros2 pkg prefix imu_filter_madgwick >/dev/null 2>&1; then
+		echo "--imu requested, but imu_filter_madgwick is not installed" >&2
+		exit 1
 	fi
 fi
-USE_IMU=false
 echo "RTAB-Map IMU leveling: $USE_IMU"
 
 RECORD_CLOUD_MAP=false
@@ -169,10 +230,18 @@ if ros2 bag info "$BAG_PATH" 2>/dev/null | grep -q 'Topic: /ground_truth/visible
 	echo "Recording cloud evaluation inputs to: $CLOUD_EVAL_BAG"
 fi
 
-ros2 launch exo_head_slam main_pipeline_launch.py use_sim_time:=true metrics_csv_path:="$METRICS_CSV" exo_pitch_deg:="$EXO_PITCH_DEG" head_pitch_deg:="$HEAD_PITCH_DEG" use_imu:="$USE_IMU" imu_topic:=/camera/exo/imu exoskeleton_dataset:="$EXOSKELETON_DATASET" "${GT_LAUNCH_ARGS[@]}" &
+echo "Playback rate: ${PLAYBACK_RATE}x"
+echo "Loop playback: $LOOP_PLAYBACK"
+echo "Debug point clouds: $PUBLISH_DEBUG_PCL"
+echo "RTAB-Map input: /camera/exo/color/image_raw + /exo/filtered/depth_raw"
+
+ros2 launch exo_head_slam main_pipeline_launch.py use_sim_time:=true publish_debug_pcl:="$PUBLISH_DEBUG_PCL" metrics_csv_path:="$METRICS_CSV" exo_pitch_deg:="$EXO_PITCH_DEG" head_pitch_deg:="$HEAD_PITCH_DEG" use_imu:="$USE_IMU" imu_topic:=/camera/exo/imu exoskeleton_dataset:="$EXOSKELETON_DATASET" "${GT_LAUNCH_ARGS[@]}" &
 PIPELINE_PID=$!
 
-wait_for_pipeline
+if ! wait_for_pipeline; then
+	echo "Pipeline did not become ready within 180 seconds" >&2
+	exit 1
+fi
 
 if [[ "$RECORD_CLOUD_MAP" == true ]]; then
 	ros2 bag record -s mcap -o "$CLOUD_EVAL_BAG" --disable-keyboard-controls \
@@ -190,12 +259,24 @@ if [[ "$EXOSKELETON_DATASET" == true ]]; then
 	# Avoid duplicate parents; the launch file republishes only the camera transforms it needs.
 	PLAY_REMAP=(--remap /tf_static:=/recorded/tf_static)
 fi
-ros2 bag play -i "$BAG_PATH" mcap --loop --rate 0.2 --disable-keyboard-controls --clock "${PLAY_REMAP[@]}" &
-     #--remap /tf:=/tf_old /tf_static:=/tf_static_old &
+PLAY_ARGS=(-i "$BAG_PATH" mcap --rate "$PLAYBACK_RATE" --disable-keyboard-controls --clock)
+if [[ "$LOOP_PLAYBACK" == true ]]; then
+	PLAY_ARGS+=(--loop)
+fi
+ros2 bag play "${PLAY_ARGS[@]}" "${PLAY_REMAP[@]}" &
 BAG_PID=$!
 
 # Launch RViz with pre-configured displays
 rviz2 -d "$(ros2 pkg prefix exo_head_slam)/share/exo_head_slam/rviz/pipeline.rviz" --ros-args -p use_sim_time:=true &
 RVIZ_PID=$!
 
-wait "$PIPELINE_PID"
+if [[ "$LOOP_PLAYBACK" == true ]]; then
+	wait "$PIPELINE_PID"
+else
+	BAG_STATUS=0
+	wait "$BAG_PID" || BAG_STATUS=$?
+	BAG_PID=""
+	echo "Bag playback finished; draining pipeline for 5 seconds..."
+	sleep 5
+	exit "$BAG_STATUS"
+fi
