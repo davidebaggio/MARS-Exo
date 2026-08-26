@@ -1,5 +1,6 @@
 import csv
 import os
+import sys
 
 import message_filters
 import numpy as np
@@ -28,6 +29,12 @@ def voxel_downsample(points, voxel_size):
     return points[np.unique(keys, axis=0, return_index=True)[1]]
 
 
+def merge_voxels(voxels, points, voxel_size):
+    keys = np.floor(points / voxel_size).astype(np.int64)
+    for key, point in zip(map(tuple, keys), points):
+        voxels.setdefault(key, point)
+
+
 def cloud_metrics(estimated, ground_truth, threshold):
     est_to_gt = cKDTree(ground_truth).query(estimated, workers=-1)[0]
     gt_to_est = cKDTree(estimated).query(ground_truth, workers=-1)[0]
@@ -44,7 +51,7 @@ def cloud_metrics(estimated, ground_truth, threshold):
 
 
 class CloudMapEvaluatorNode(Node):
-    def __init__(self):
+    def __init__(self, global_flag=False):
         super().__init__('cloud_map_evaluator')
         self.declare_parameter('vggt_cloud_topic', '/vggt/combined_pointcloud')
         self.declare_parameter('ground_truth_cloud_topic', '/ground_truth/visible_cloud')
@@ -54,10 +61,22 @@ class CloudMapEvaluatorNode(Node):
         self.declare_parameter('fscore_threshold', 0.1)
         self.declare_parameter('waist_to_exo_translation', [0.07, 0.0, 0.0])
         self.declare_parameter('waist_to_exo_pitch_deg', 0.0)
+        self.declare_parameter('global', True)
 
         self.metrics_csv_path = self.get_parameter('metrics_csv_path').value
+        root, extension = os.path.splitext(self.metrics_csv_path)
+        for path in (self.metrics_csv_path, f'{root}_global{extension}',
+                     f'{root}_global_maps.npz'):
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
         self.voxel_size = float(self.get_parameter('voxel_size').value)
         self.fscore_threshold = float(self.get_parameter('fscore_threshold').value)
+        self.global_mode = global_flag or self.get_parameter('global').value
+        self.estimated_voxels = {}
+        self.ground_truth_voxels = {}
+        self.last_ground_truth_msg = None
         self.waist_to_exo = transform_matrix(
             self.get_parameter('waist_to_exo_translation').value,
             Rotation.from_euler(
@@ -76,7 +95,9 @@ class CloudMapEvaluatorNode(Node):
             [vggt_sub, ground_truth_sub, odom_sub], queue_size=200, slop=0.25)
         self.sync.registerCallback(self.evaluate)
         self.get_logger().info(
-            f'Visible-cloud evaluator online. voxel={self.voxel_size:.3f} m, '
+            f'Visible-cloud evaluator online (per-frame'
+            f'{" + global" if self.global_mode else ""}). '
+            f'voxel={self.voxel_size:.3f} m, '
             f'F-score threshold={self.fscore_threshold:.3f} m')
 
     @staticmethod
@@ -99,8 +120,14 @@ class CloudMapEvaluatorNode(Node):
         estimated = self.points(vggt_msg)
         estimated = estimated[np.isfinite(estimated).all(axis=1)]
         estimated = estimated @ world_to_exo[:3, :3].T + world_to_exo[:3, 3]
+        ground_truth = self.points(ground_truth_msg)
+        if self.global_mode:
+            merge_voxels(self.estimated_voxels, estimated, self.voxel_size)
+            merge_voxels(self.ground_truth_voxels, ground_truth, self.voxel_size)
+            self.last_ground_truth_msg = ground_truth_msg
+
         estimated = voxel_downsample(estimated, self.voxel_size)
-        ground_truth = voxel_downsample(self.points(ground_truth_msg), self.voxel_size)
+        ground_truth = voxel_downsample(ground_truth, self.voxel_size)
         if len(estimated) == 0 or len(ground_truth) == 0:
             self.get_logger().warn('Skipping empty VGGT or ground-truth visible cloud.')
             return
@@ -110,11 +137,36 @@ class CloudMapEvaluatorNode(Node):
             f'Visible cloud evaluation: Chamfer={metrics["chamfer"]:.3f} m, '
             f'F-score={metrics["fscore"]:.3f}, points={len(estimated)}/{len(ground_truth)}')
 
-    def write_metrics(self, msg, estimated_points, ground_truth_points, metrics):
-        dirname = os.path.dirname(self.metrics_csv_path)
+    def finish_global(self):
+        if not self.global_mode or self.last_ground_truth_msg is None:
+            return
+        estimated = np.asarray(list(self.estimated_voxels.values()))
+        ground_truth = np.asarray(list(self.ground_truth_voxels.values()))
+        if len(estimated) == 0 or len(ground_truth) == 0:
+            self.get_logger().warn('Skipping empty global VGGT or ground-truth map.')
+            return
+        self.get_logger().info(
+            f'Finalizing global maps: {len(estimated)}/{len(ground_truth)} points...')
+        metrics = cloud_metrics(estimated, ground_truth, self.fscore_threshold)
+        root, extension = os.path.splitext(self.metrics_csv_path)
+        self.write_metrics(
+            self.last_ground_truth_msg, len(estimated), len(ground_truth), metrics,
+            f'{root}_global{extension}')
+        np.savez_compressed(
+            f'{root}_global_maps.npz',
+            predicted=estimated.astype(np.float32),
+            ground_truth=ground_truth.astype(np.float32),
+        )
+        self.get_logger().info(
+            f'Global visible-map evaluation: Chamfer={metrics["chamfer"]:.3f} m, '
+            f'F-score={metrics["fscore"]:.3f}, points={len(estimated)}/{len(ground_truth)}')
+
+    def write_metrics(self, msg, estimated_points, ground_truth_points, metrics, path=None):
+        path = path or self.metrics_csv_path
+        dirname = os.path.dirname(path)
         if dirname:
             os.makedirs(dirname, exist_ok=True)
-        exists = os.path.exists(self.metrics_csv_path) and os.path.getsize(self.metrics_csv_path) > 0
+        exists = os.path.exists(path) and os.path.getsize(path) > 0
         row = {
             'timestamp': msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
             'voxel_size': self.voxel_size,
@@ -123,7 +175,7 @@ class CloudMapEvaluatorNode(Node):
             'ground_truth_points': ground_truth_points,
             **metrics,
         }
-        with open(self.metrics_csv_path, 'a', newline='') as stream:
+        with open(path, 'a', newline='') as stream:
             writer = csv.DictWriter(stream, fieldnames=row.keys())
             if not exists:
                 writer.writeheader()
@@ -131,13 +183,16 @@ class CloudMapEvaluatorNode(Node):
 
 
 def main(args=None):
-    rclpy.init(args=args)
-    node = CloudMapEvaluatorNode()
+    args = list(sys.argv[1:] if args is None else args)
+    global_flag = '--global' in args
+    rclpy.init(args=[arg for arg in args if arg != '--global'])
+    node = CloudMapEvaluatorNode(global_flag)
     try:
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
+        node.finish_global()
         if rclpy.ok():
             node.destroy_node()
         rclpy.try_shutdown()

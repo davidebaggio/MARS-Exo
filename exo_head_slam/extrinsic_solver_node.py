@@ -2,6 +2,7 @@ import rclpy
 import csv
 import os
 import sys
+import time
 
 import numpy as np
 import cv2
@@ -101,6 +102,11 @@ class ExtrinsicSolverNode(Node):
         self.gt_parent_frame = self.get_parameter('gt_parent_frame').value
         self.gt_child_frame = self.get_parameter('gt_child_frame').value
         self.gt_tf_static_topic = self.get_parameter('gt_tf_static_topic').value
+        if self.metrics_enabled:
+            dirname = os.path.dirname(self.metrics_csv_path)
+            if dirname:
+                os.makedirs(dirname, exist_ok=True)
+            open(self.metrics_csv_path, 'w').close()
 
         self.bridge = CvBridge()
         self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
@@ -134,6 +140,7 @@ class ExtrinsicSolverNode(Node):
         self.image_buffer = []
         self.dino_feature_buffer = []
         self.last_solver_time = None
+        self.cycle_start_time = None
 
         # Publishers
         self.head_combined_depth_pub = self.create_publisher(Image, '/head/combined/depth_raw', 10)
@@ -256,6 +263,7 @@ class ExtrinsicSolverNode(Node):
                       (stamp_sec - self.last_solver_time) >= self.min_solver_interval)
 
         if run_solver:
+            self.cycle_start_time = time.perf_counter()
             self.get_logger().info("Solver: received synced quad. Estimating extrinsic & depth with VGGT-Omega...")
             scale = 1.0
             head_depth_rmse = head_depth_mae = None
@@ -678,11 +686,16 @@ class ExtrinsicSolverNode(Node):
         if dirname:
             os.makedirs(dirname, exist_ok=True)
         file_exists = os.path.exists(self.metrics_csv_path) and os.path.getsize(self.metrics_csv_path) > 0
+        cycle_time_sec = (
+            time.perf_counter() - self.cycle_start_time
+            if self.cycle_start_time is not None else None
+        )
         header = [
             'timestamp', 'status', 'scale',
             'head_depth_rmse', 'head_depth_mae', 'exo_depth_rmse', 'exo_depth_mae',
             'head_conf_p50', 'head_conf_p95', 'exo_conf_p50', 'exo_conf_p95', 'conf_thr',
-            't_x', 't_y', 't_z', 'gt_t_x', 'gt_t_y', 'gt_t_z', 'error_t', 'error_r_deg'
+            't_x', 't_y', 't_z', 'gt_t_x', 'gt_t_y', 'gt_t_z', 'error_t', 'error_r_deg',
+            'cycle_time_sec'
         ]
         try:
             with open(self.metrics_csv_path, mode='a', newline='') as f:
@@ -693,7 +706,8 @@ class ExtrinsicSolverNode(Node):
                     stamp_sec, status, scale,
                     head_depth_rmse, head_depth_mae, exo_depth_rmse, exo_depth_mae,
                     h_conf_p50, h_conf_p95, e_conf_p50, e_conf_p95, conf_thr,
-                    t_x, t_y, t_z, gt_t_x, gt_t_y, gt_t_z, error_t, error_r_deg
+                    t_x, t_y, t_z, gt_t_x, gt_t_y, gt_t_z, error_t, error_r_deg,
+                    cycle_time_sec
                 ])
         except Exception as e:
             self.get_logger().error(f"Failed to write metrics to CSV: {str(e)}")

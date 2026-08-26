@@ -5,8 +5,8 @@ set -euo pipefail
 #DEFAULT_BAG="data/rosbag2_2026_06_11-15_31_00/rosbag2_2026_06_11-15_31_00_0.mcap"
 #DEFAULT_BAG="data/rosbag2_2026_06_11-15_34_13/rosbag2_2026_06_11-15_34_13_0.mcap"
 #DEFAULT_BAG="data/exoskeleton_dataset_0_0_0/exoskeleton_dataset_0_0_0.mcap"
-#DEFAULT_BAG="data/exoskeleton_dataset_1_20_35/exoskeleton_dataset_1_20_35.mcap"
-DEFAULT_BAG="data/exoskeleton_dataset_2_10_40/exoskeleton_dataset_2_10_40.mcap"
+DEFAULT_BAG="data/exoskeleton_dataset_1_20_35/exoskeleton_dataset_1_20_35.mcap"
+#DEFAULT_BAG="data/exoskeleton_dataset_2_10_40/exoskeleton_dataset_2_10_40.mcap"
 
 BAG_PATH="${1:-$DEFAULT_BAG}"
 EXOSKELETON_DATASET=false
@@ -22,13 +22,29 @@ if [[ ! -e "$BAG_PATH" ]]; then
 	echo "Bag path not found: $BAG_PATH" >&2
 	exit 1
 fi
+BAG_NAME="$(basename "$BAG_PATH" .mcap)"
+SLIDING_WINDOW_SIZE="$(sed -nE 's/^[[:space:]]*sliding_window_size:[[:space:]]*([0-9]+).*/\1/p' config/common.yaml | head -n 1)"
+if [[ -z "$SLIDING_WINDOW_SIZE" ]]; then
+	echo "sliding_window_size not found in config/common.yaml" >&2
+	exit 1
+fi
+if [[ "$BAG_NAME" =~ _(-?[0-9]+([.][0-9]+)?)_(-?[0-9]+([.][0-9]+)?)_(-?[0-9]+([.][0-9]+)?)$ ]]; then
+	DATASET_NUMBERS="${BASH_REMATCH[1]}_${BASH_REMATCH[3]}_${BASH_REMATCH[5]}"
+	DATASET_EXO_PITCH="${BASH_REMATCH[3]}"
+	DATASET_HEAD_PITCH="${BASH_REMATCH[5]}"
+else
+	DATASET_NUMBERS="$BAG_NAME"
+	DATASET_EXO_PITCH=""
+	DATASET_HEAD_PITCH=""
+fi
+RUN_ID="${DATASET_NUMBERS}_${SLIDING_WINDOW_SIZE}"
+
 if ros2 bag info "$BAG_PATH" 2>/dev/null | grep -q 'Topic: /exoskeleton/odom | Type: nav_msgs/msg/Odometry'; then
 	EXOSKELETON_DATASET=true
 	GT_LAUNCH_ARGS=(gt_parent_frame:=gt_exo_link gt_child_frame:=gt_head_link)
-	BAG_NAME="$(basename "$BAG_PATH" .mcap)"
-	if [[ "$BAG_NAME" =~ ^exoskeleton_dataset_[^_]+_(-?[0-9]+([.][0-9]+)?)_(-?[0-9]+([.][0-9]+)?)$ ]]; then
-		EXO_PITCH_DEG="${BASH_REMATCH[1]}"
-		HEAD_PITCH_DEG="${BASH_REMATCH[3]}"
+	if [[ -n "$DATASET_EXO_PITCH" ]]; then
+		EXO_PITCH_DEG="$DATASET_EXO_PITCH"
+		HEAD_PITCH_DEG="$DATASET_HEAD_PITCH"
 	else
 		echo "Warning: cannot parse camera pitches from $BAG_NAME; using 0/0 degrees." >&2
 	fi
@@ -113,9 +129,8 @@ if [ -d "install/exo_head_slam/lib/exo_head_slam" ]; then
     sed -i "1s|^#!.*python.*|#!$(which python3)|" install/exo_head_slam/lib/exo_head_slam/*
 fi
 
-TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 mkdir -p metrics/pipeline
-METRICS_CSV="metrics/pipeline/metrics_${TIMESTAMP}.csv"
+METRICS_CSV="metrics/pipeline/metrics_${RUN_ID}.csv"
 echo "Logging metrics to: $METRICS_CSV"
 
 # fastcdr 2.2.5 needs the local compatibility shim. Current Jazzy releases do not.
@@ -137,6 +152,7 @@ if ros2 bag info "$BAG_PATH" 2>/dev/null | grep -q 'Topic: /camera/exo/imu | Typ
 		echo "Warning: bag contains IMU data, but imu_filter_madgwick is missing; continuing without IMU." >&2
 	fi
 fi
+USE_IMU=false
 echo "RTAB-Map IMU leveling: $USE_IMU"
 
 RECORD_CLOUD_MAP=false
@@ -144,17 +160,25 @@ if ros2 bag info "$BAG_PATH" 2>/dev/null | grep -q 'Topic: /ground_truth/visible
 	RECORD_CLOUD_MAP=true
 	CLOUD_METRICS_CSV="${METRICS_CSV%.csv}_cloud.csv"
 	CLOUD_EVAL_BAG="${METRICS_CSV%.csv}_cloud_bag"
+	case "$CLOUD_EVAL_BAG" in
+		metrics/pipeline/metrics_*_cloud_bag) rm -rf -- "$CLOUD_EVAL_BAG" ;;
+		*) echo "Refusing to replace unexpected bag path: $CLOUD_EVAL_BAG" >&2; exit 1 ;;
+	esac
+	rm -f -- "$CLOUD_METRICS_CSV" "${CLOUD_METRICS_CSV%.csv}_global.csv" \
+		"${CLOUD_METRICS_CSV%.csv}_global_maps.npz"
 	echo "Recording cloud evaluation inputs to: $CLOUD_EVAL_BAG"
 fi
 
-ros2 launch exo_head_slam main_pipeline_launch.py use_sim_time:=true publish_debug_pcl:=true metrics_csv_path:="$METRICS_CSV" exo_pitch_deg:="$EXO_PITCH_DEG" head_pitch_deg:="$HEAD_PITCH_DEG" use_imu:="$USE_IMU" imu_topic:=/camera/exo/imu exoskeleton_dataset:="$EXOSKELETON_DATASET" "${GT_LAUNCH_ARGS[@]}" &
+ros2 launch exo_head_slam main_pipeline_launch.py use_sim_time:=true metrics_csv_path:="$METRICS_CSV" exo_pitch_deg:="$EXO_PITCH_DEG" head_pitch_deg:="$HEAD_PITCH_DEG" use_imu:="$USE_IMU" imu_topic:=/camera/exo/imu exoskeleton_dataset:="$EXOSKELETON_DATASET" "${GT_LAUNCH_ARGS[@]}" &
 PIPELINE_PID=$!
 
 wait_for_pipeline
 
 if [[ "$RECORD_CLOUD_MAP" == true ]]; then
 	ros2 bag record -s mcap -o "$CLOUD_EVAL_BAG" --disable-keyboard-controls \
-		--custom-data "exo_pitch_deg=$EXO_PITCH_DEG" --topics \
+		--custom-data "exo_pitch_deg=$EXO_PITCH_DEG" \
+			"dataset_numbers=$DATASET_NUMBERS" \
+			"sliding_window_size=$SLIDING_WINDOW_SIZE" --topics \
 		/vggt/combined_pointcloud /ground_truth/visible_cloud /exoskeleton/odom &
 	CLOUD_RECORD_PID=$!
 	sleep 1
@@ -166,7 +190,7 @@ if [[ "$EXOSKELETON_DATASET" == true ]]; then
 	# Avoid duplicate parents; the launch file republishes only the camera transforms it needs.
 	PLAY_REMAP=(--remap /tf_static:=/recorded/tf_static)
 fi
-ros2 bag play -i "$BAG_PATH" mcap --loop --rate 0.8 --disable-keyboard-controls --clock "${PLAY_REMAP[@]}" &
+ros2 bag play -i "$BAG_PATH" mcap --loop --rate 0.2 --disable-keyboard-controls --clock "${PLAY_REMAP[@]}" &
      #--remap /tf:=/tf_old /tf_static:=/tf_static_old &
 BAG_PID=$!
 

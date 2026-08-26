@@ -1,3 +1,6 @@
+import os
+import re
+
 import rosbag2_py
 from launch import LaunchDescription
 from launch.actions import (
@@ -19,9 +22,18 @@ def _launch_evaluation(context):
     bag_path = LaunchConfiguration('bag_path').perform(context)
     metrics_csv_path = LaunchConfiguration('metrics_csv_path')
     playback_rate = LaunchConfiguration('playback_rate')
+    global_mode = LaunchConfiguration('global')
     config = PathJoinSubstitution([FindPackageShare('exo_head_slam'), 'config', 'common.yaml'])
     metadata = rosbag2_py.Info().read_metadata(bag_path, 'mcap')
     exo_pitch_deg = metadata.custom_data.get('exo_pitch_deg')
+    if exo_pitch_deg is None:
+        match = re.fullmatch(
+            r'metrics_(-?\d+(?:\.\d+)?)_(-?\d+(?:\.\d+)?)_'
+            r'(-?\d+(?:\.\d+)?)_(\d+)_cloud_bag',
+            os.path.basename(os.path.normpath(bag_path)),
+        )
+        if match:
+            exo_pitch_deg = match.group(2)
     if exo_pitch_deg is None:
         exo_pitch_deg = LaunchConfiguration('exo_pitch_deg').perform(context)
     if not exo_pitch_deg:
@@ -33,10 +45,13 @@ def _launch_evaluation(context):
         package='exo_head_slam',
         executable='cloud_map_evaluator',
         name='cloud_map_evaluator',
+        sigterm_timeout='300',
+        sigkill_timeout='30',
         parameters=[config, {
             'use_sim_time': True,
             'metrics_csv_path': metrics_csv_path,
             'waist_to_exo_pitch_deg': float(exo_pitch_deg),
+            'global': global_mode,
         }],
     )
     player = ExecuteProcess(cmd=[
@@ -62,6 +77,7 @@ def generate_launch_description():
         DeclareLaunchArgument('bag_path'),
         DeclareLaunchArgument('metrics_csv_path', default_value='cloud_metrics.csv'),
         DeclareLaunchArgument('exo_pitch_deg', default_value=''),
-        DeclareLaunchArgument('playback_rate', default_value='1.0'),
+        DeclareLaunchArgument('playback_rate', default_value='3.0'),
+        DeclareLaunchArgument('global', default_value='true'),
         OpaqueFunction(function=_launch_evaluation),
     ])

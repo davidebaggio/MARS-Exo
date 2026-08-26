@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import glob
 import os
 import sys
 import pandas as pd
@@ -11,20 +12,87 @@ if not os.environ.get('DISPLAY', '').strip():
 
 import matplotlib.pyplot as plt
 
-def main():
-    csv_path = None
-    if len(sys.argv) > 1:
-        csv_path = sys.argv[1]
+
+def plot_cloud_metrics(csv_path, df):
+    name = os.path.splitext(os.path.basename(csv_path))[0]
+    eval_dir = 'metrics/eval'
+    os.makedirs(eval_dir, exist_ok=True)
+    output_image = os.path.join(eval_dir, f'{name}_plot.png')
+    output_text = os.path.join(eval_dir, f'{name}_summary.txt')
+    cloud = df.mean(numeric_only=True)
+
+    fig, ax = plt.subplots(figsize=(9, 7))
+    fig.suptitle('VGGT Visible Cloud vs Ground Truth', fontsize=16, fontweight='bold')
+    columns = ['accuracy_mean', 'accuracy_rmse', 'completeness_mean',
+               'completeness_rmse', 'chamfer']
+    labels = ['Accuracy\nmean', 'Accuracy\nRMSE', 'Completeness\nmean',
+              'Completeness\nRMSE', 'Chamfer']
+    bars = ax.bar(labels, [cloud[column] for column in columns], color='#3498db')
+    ax.bar_label(bars, fmt='%.3f')
+    ax.set_ylabel('Distance (m)')
+    ax.set_title(f'Mean metrics over {len(df)} evaluation row(s)\nF-score: {cloud["fscore"]:.3f}')
+    ax.grid(True, axis='y', linestyle='--', alpha=0.5)
+
+    maps_path = f'{os.path.splitext(csv_path)[0]}_maps.npz'
+    if os.path.exists(maps_path):
+        import open3d as o3d
+
+        with np.load(maps_path) as maps:
+            predicted = maps['predicted']
+            ground_truth = maps['ground_truth']
+
+        gt_cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(ground_truth))
+        gt_cloud.paint_uniform_color([0.18, 0.80, 0.44])
+        predicted_cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(predicted))
+        predicted_cloud.paint_uniform_color([0.90, 0.30, 0.24])
+        combined = gt_cloud + predicted_cloud
+        output_cloud = os.path.join(eval_dir, f'{name}_maps.ply')
+        o3d.io.write_point_cloud(output_cloud, combined)
+        print(f'Open3D cloud successfully saved to: {os.path.abspath(output_cloud)}')
+
+        if os.environ.get('DISPLAY', '').strip():
+            extent = np.ptp(np.vstack((predicted, ground_truth)), axis=0).max()
+            axes = o3d.geometry.TriangleMesh.create_coordinate_frame(size=max(0.1, extent * 0.1))
+            visualizer = o3d.visualization.Visualizer()
+            visualizer.create_window(
+                window_name='Global maps — green: ground truth, red: VGGT predicted')
+            for geometry in (gt_cloud, predicted_cloud, axes):
+                visualizer.add_geometry(geometry)
+            visualizer.get_render_option().point_size *= 0.5
+            visualizer.run()
+            visualizer.destroy_window()
     else:
-        import glob
-        files = [path for path in glob.glob('metrics/pipeline/metrics_*.csv')
-                 if not path.endswith('_cloud.csv')]
-        if files:
-            files.sort()
-            csv_path = files[-1]
-            print(f"No CSV path provided. Automatically picked the latest: {csv_path}")
-        else:
-            csv_path = 'extrinsic_metrics.csv'
+        print(f'Global map data not found: {maps_path}. Rerun offline evaluation to create it.')
+
+    plt.tight_layout()
+    plt.savefig(output_image, dpi=150)
+    summary = [
+        'VGGT VISIBLE CLOUD VS GROUND TRUTH',
+        f'Metrics CSV: {csv_path}',
+        f'Evaluation rows: {len(df)}',
+        f'Voxel size: {cloud["voxel_size"]:.4f} m',
+        f'Accuracy mean: {cloud["accuracy_mean"]:.4f} m',
+        f'Accuracy RMSE: {cloud["accuracy_rmse"]:.4f} m',
+        f'Completeness mean: {cloud["completeness_mean"]:.4f} m',
+        f'Completeness RMSE: {cloud["completeness_rmse"]:.4f} m',
+        f'Chamfer distance: {cloud["chamfer"]:.4f} m',
+        f'F-score: {cloud["fscore"]:.4f}',
+    ]
+    with open(output_text, 'w') as stream:
+        stream.write('\n'.join(summary))
+    print(f'Plot successfully saved to: {os.path.abspath(output_image)}')
+    print(f'Summary report successfully saved to: {os.path.abspath(output_text)}')
+
+
+def latest_metrics_files(directory='metrics/pipeline'):
+    files = glob.glob(os.path.join(directory, 'metrics_*.csv'))
+    regular = [path for path in files
+               if not path.endswith(('_cloud.csv', '_cloud_global.csv'))]
+    global_cloud = [path for path in files if path.endswith('_cloud_global.csv')]
+    return [max(paths, key=os.path.getmtime) for paths in (regular, global_cloud) if paths]
+
+
+def main(csv_path):
 
     if not os.path.exists(csv_path):
         print(f"Error: Metrics file '{csv_path}' not found.")
@@ -41,6 +109,10 @@ def main():
     if df.empty:
         print("Error: Metrics file is empty.")
         sys.exit(0)
+
+    if {'accuracy_mean', 'completeness_mean', 'chamfer', 'fscore'} <= set(df.columns):
+        plot_cloud_metrics(csv_path, df)
+        return
 
     csv_basename = os.path.basename(csv_path)
     csv_name_no_ext = os.path.splitext(csv_basename)[0]
@@ -218,6 +290,18 @@ def main():
         summary_lines.append(f"{status:<20}: {count:>4} ({pct:>6.2f}%)")
     summary_lines.append("")
 
+    if 'cycle_time_sec' in df.columns and df['cycle_time_sec'].notna().any():
+        cycle_times = df['cycle_time_sec'].dropna()
+        summary_lines.extend([
+            "-----------------------------------------",
+            "PIPELINE CYCLE COMPUTE TIME",
+            "-----------------------------------------",
+            f"Average: {cycle_times.mean():>8.3f} s",
+            f"Minimum: {cycle_times.min():>8.3f} s",
+            f"Maximum: {cycle_times.max():>8.3f} s",
+            "",
+        ])
+
     if num_success > 0:
         summary_lines.append("-----------------------------------------")
         summary_lines.append("ESTIMATED EXTRINSICS STATS (SUCCESS ONLY)")
@@ -338,8 +422,13 @@ def main():
     except Exception as e:
         print(f"Error writing summary file: {e}")
 
+if __name__ == '__main__':
+    paths = [sys.argv[1]] if len(sys.argv) > 1 else latest_metrics_files()
+    if not paths:
+        paths = ['extrinsic_metrics.csv']
+    else:
+        print(f'Plotting: {", ".join(paths)}')
+    for path in paths:
+        main(path)
     if os.environ.get('DISPLAY', '').strip():
         plt.show()
-
-if __name__ == '__main__':
-    main()
