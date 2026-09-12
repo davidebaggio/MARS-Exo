@@ -17,12 +17,16 @@ from rclpy.qos import (
     ReliabilityPolicy,
     qos_profile_sensor_data,
 )
-from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation, Slerp
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
 from std_srvs.srv import Trigger
 from tf2_msgs.msg import TFMessage
+
+from exo_head_slam.cloud_map_evaluator_node import (
+    cloud_metrics as current_cloud_metrics,
+    voxel_downsample,
+)
 
 
 def _transform(position, quaternion):
@@ -45,13 +49,35 @@ def rigid_alignment(source, target):
     return rotation, translation
 
 
+def similarity_alignment(source, target):
+    """Return Sim(3) mapping source points into target coordinates."""
+    source_center = source.mean(axis=0)
+    target_center = target.mean(axis=0)
+    centered_source = source - source_center
+    centered_target = target - target_center
+    u, singular_values, vt = np.linalg.svd(centered_source.T @ centered_target)
+    rotation = vt.T @ u.T
+    if np.linalg.det(rotation) < 0:
+        vt[-1] *= -1
+        singular_values[-1] *= -1
+        rotation = vt.T @ u.T
+    source_variance = np.sum(centered_source ** 2)
+    if source_variance <= np.finfo(float).eps:
+        raise ValueError('Cannot align a zero-motion trajectory')
+    scale = singular_values.sum() / source_variance
+    translation = target_center - scale * rotation @ source_center
+    return float(scale), rotation, translation
+
+
 def visualization_alignment(world_from_camera, map_start_z):
     viz_ground_from_map = np.eye(4)
     viz_ground_from_map[2, 3] = map_start_z
     return world_from_camera @ np.linalg.inv(viz_ground_from_map)
 
 
-def match_trajectories(estimated, ground_truth, waist_from_camera):
+def match_trajectories(
+    estimated, ground_truth, waist_from_camera, max_interpolation_gap=None
+):
     estimated = sorted(estimated, key=lambda row: row[0])
     ground_truth = sorted(ground_truth, key=lambda row: row[0])
     gt_times, unique = np.unique([row[0] for row in ground_truth], return_index=True)
@@ -66,34 +92,72 @@ def match_trajectories(estimated, ground_truth, waist_from_camera):
         camera_rotations.append(Rotation.from_matrix(world_from_camera[:3, :3]).as_quat())
     camera_positions = np.asarray(camera_positions)
 
-    valid_estimated = [
-        row for row in estimated if gt_times[0] <= row[0] <= gt_times[-1]
-    ]
-    times = np.asarray([row[0] for row in valid_estimated])
-    if len(times) < 3 or len(gt_times) < 2:
+    estimated_times, estimated_unique = np.unique(
+        [row[0] for row in estimated], return_index=True
+    )
+    estimated_positions = np.asarray([estimated[i][1] for i in estimated_unique])
+    estimated_rotations = Rotation.from_quat(
+        [estimated[i][2] for i in estimated_unique]
+    )
+    if len(estimated_times) < 3 or len(gt_times) < 2:
         raise ValueError('Not enough overlapping trajectory samples')
 
-    gt_interp_positions = np.column_stack([
-        np.interp(times, gt_times, camera_positions[:, axis]) for axis in range(3)
-    ])
-    gt_interp_rotations = Slerp(
-        gt_times, Rotation.from_quat(camera_rotations)
-    )(times).as_quat()
+    if max_interpolation_gap is None:
+        valid = (estimated_times >= gt_times[0]) & (estimated_times <= gt_times[-1])
+        times = estimated_times[valid]
+        estimated_positions = estimated_positions[valid]
+        estimated_quaternions = estimated_rotations[valid].as_quat()
+        gt_matched_positions = np.column_stack([
+            np.interp(times, gt_times, camera_positions[:, axis]) for axis in range(3)
+        ])
+        gt_matched_quaternions = Slerp(
+            gt_times, Rotation.from_quat(camera_rotations)
+        )(times).as_quat()
+        segments = np.zeros(len(times), dtype=int)
+        target_count = len(times)
+    else:
+        target_indices = np.flatnonzero(
+            (gt_times >= estimated_times[0]) & (gt_times <= estimated_times[-1])
+        )
+        target_times = gt_times[target_indices]
+        right = np.searchsorted(estimated_times, target_times, side='right')
+        left = np.maximum(right - 1, 0)
+        right = np.minimum(right, len(estimated_times) - 1)
+        exact = np.isclose(target_times, estimated_times[left], atol=1e-6)
+        gaps = estimated_times[right] - estimated_times[left]
+        covered = exact | ((right > left) & (gaps <= max_interpolation_gap))
+        target_indices = target_indices[covered]
+        times = gt_times[target_indices]
+        if len(times) < 3:
+            raise ValueError('Fewer than three ground-truth samples are covered')
+        estimated_positions = np.column_stack([
+            np.interp(times, estimated_times, estimated_positions[:, axis])
+            for axis in range(3)
+        ])
+        estimated_quaternions = Slerp(
+            estimated_times, estimated_rotations
+        )(times).as_quat()
+        gt_matched_positions = camera_positions[target_indices]
+        gt_matched_quaternions = np.asarray(camera_rotations)[target_indices]
+        segments = np.cumsum(np.r_[0, np.diff(target_indices) > 1])
+        target_count = len(gt_times)
 
     return {
         'times': times,
-        'estimated_positions': np.asarray([row[1] for row in valid_estimated]),
-        'estimated_quaternions': np.asarray([row[2] for row in valid_estimated]),
-        'gt_positions': gt_interp_positions,
-        'gt_quaternions': gt_interp_rotations,
+        'estimated_positions': estimated_positions,
+        'estimated_quaternions': estimated_quaternions,
+        'gt_positions': gt_matched_positions,
+        'gt_quaternions': gt_matched_quaternions,
+        'segments': segments,
+        'target_count': int(target_count),
+        'raw_estimated_count': int(len(estimated_times)),
     }
 
 
-def trajectory_metrics(matched):
+def _trajectory_metrics(matched, scale, align_rotation, align_translation):
     estimated = matched['estimated_positions']
     ground_truth = matched['gt_positions']
-    align_rotation, align_translation = rigid_alignment(estimated, ground_truth)
-    aligned = estimated @ align_rotation.T + align_translation
+    aligned = scale * (estimated @ align_rotation.T) + align_translation
 
     aligned_rotations = Rotation.from_matrix(align_rotation) * Rotation.from_quat(
         matched['estimated_quaternions']
@@ -106,12 +170,24 @@ def trajectory_metrics(matched):
     )
 
     times = matched['times']
-    end_indices = np.searchsorted(times, times + 1.0)
-    start_indices = np.arange(len(times))
-    valid = (end_indices < len(times))
-    valid &= np.where(valid, np.abs(times[np.minimum(end_indices, len(times) - 1)] - times - 1.0) <= 0.1, False)
-    start_indices = start_indices[valid]
-    end_indices = end_indices[valid]
+    tolerance = 0.1
+    if len(times) > 1:
+        tolerance = max(tolerance, 0.55 * np.median(np.diff(times)))
+    start_indices = []
+    end_indices = []
+    segments = matched.get('segments', np.zeros(len(times), dtype=int))
+    for start, desired in enumerate(times + 1.0):
+        insertion = np.searchsorted(times, desired)
+        candidates = [index for index in (insertion - 1, insertion)
+                      if start < index < len(times)]
+        if not candidates:
+            continue
+        end = min(candidates, key=lambda index: abs(times[index] - desired))
+        if abs(times[end] - desired) <= tolerance and segments[start] == segments[end]:
+            start_indices.append(start)
+            end_indices.append(end)
+    start_indices = np.asarray(start_indices, dtype=int)
+    end_indices = np.asarray(end_indices, dtype=int)
 
     if len(start_indices):
         estimated_delta = aligned_rotations[start_indices].inv().apply(
@@ -128,8 +204,18 @@ def trajectory_metrics(matched):
         rpe_rotation = np.degrees(
             (gt_relative_rotation.inv() * estimated_relative_rotation).magnitude()
         )
+        estimated_distance = np.linalg.norm(
+            aligned[end_indices] - aligned[start_indices], axis=1
+        )
+        gt_distance = np.linalg.norm(
+            ground_truth[end_indices] - ground_truth[start_indices], axis=1
+        )
+        moving = gt_distance > 1e-6
+        scale_error = 100.0 * np.abs(
+            estimated_distance[moving] / gt_distance[moving] - 1.0
+        )
     else:
-        rpe_translation = rpe_rotation = np.array([])
+        rpe_translation = rpe_rotation = scale_error = np.array([])
 
     def stats(values):
         if not len(values):
@@ -143,46 +229,55 @@ def trajectory_metrics(matched):
 
     return {
         'sample_count': int(len(times)),
+        'target_sample_count': int(matched.get('target_count', len(times))),
+        'raw_estimated_count': int(matched.get('raw_estimated_count', len(times))),
+        'tracking_coverage': float(
+            len(times) / matched.get('target_count', len(times))
+        ),
+        'tracking_lost_samples': int(
+            matched.get('target_count', len(times)) - len(times)
+        ),
+        'tracked_segments': int(len(np.unique(segments))),
         'duration_s': float(times[-1] - times[0]),
         'ate_translation_m': stats(translation_error),
         'ate_rotation_deg': stats(rotation_error),
         'rpe_1s_translation_m': stats(rpe_translation),
         'rpe_1s_rotation_deg': stats(rpe_rotation),
+        'rpe_1s_scale_error_percent': stats(scale_error),
     }, align_rotation, align_translation, aligned
 
 
-def voxel_downsample(points, voxel_size=0.05):
-    # ponytail: one point per voxel; use centroids only if map-density bias appears.
-    _, indices = np.unique(
-        np.floor(points / voxel_size).astype(np.int64), axis=0, return_index=True
+def trajectory_metrics(matched):
+    rotation, translation = rigid_alignment(
+        matched['estimated_positions'], matched['gt_positions']
     )
-    return points[indices]
+    return _trajectory_metrics(matched, 1.0, rotation, translation)
 
 
-def cloud_metrics(estimated, ground_truth):
-    estimated = voxel_downsample(estimated)
-    ground_truth = voxel_downsample(ground_truth)
+def similarity_trajectory_metrics(matched):
+    scale, rotation, translation = similarity_alignment(
+        matched['estimated_positions'], matched['gt_positions']
+    )
+    metrics, _, _, aligned = _trajectory_metrics(
+        matched, scale, rotation, translation
+    )
+    return metrics, scale, rotation, translation, aligned
+
+
+def cloud_metrics(estimated, ground_truth, voxel_size=0.05):
+    estimated = voxel_downsample(estimated, voxel_size)
+    ground_truth = voxel_downsample(ground_truth, voxel_size)
     if not len(estimated) or not len(ground_truth):
         raise ValueError('Cannot evaluate an empty point cloud')
-    estimated_to_gt = cKDTree(ground_truth).query(estimated, workers=-1)[0]
-    gt_to_estimated = cKDTree(estimated).query(ground_truth, workers=-1)[0]
-
     result = {
         'estimated_points': int(len(estimated)),
         'ground_truth_points': int(len(ground_truth)),
-        'accuracy_rmse_m': float(np.sqrt(np.mean(estimated_to_gt ** 2))),
-        'completeness_rmse_m': float(np.sqrt(np.mean(gt_to_estimated ** 2))),
-        'symmetric_mean_distance_m': float(
-            (np.mean(estimated_to_gt) + np.mean(gt_to_estimated)) / 2.0
+        'voxel_size': voxel_size,
+        'fscore_threshold': 0.10,
+        **current_cloud_metrics(
+            estimated, ground_truth, 0.10, extra_thresholds=(0.02, 0.05, 0.10, 0.20)
         ),
     }
-    for threshold in (0.05, 0.10):
-        precision = float(np.mean(estimated_to_gt <= threshold))
-        recall = float(np.mean(gt_to_estimated <= threshold))
-        result[f'fscore_{int(threshold * 100):02d}cm'] = (
-            2.0 * precision * recall / (precision + recall)
-            if precision + recall else 0.0
-        )
     return result
 
 
@@ -200,15 +295,34 @@ class BenchmarkEvaluatorNode(Node):
         super().__init__('benchmark_evaluator')
         self.declare_parameter('output_prefix', 'metrics/eval/benchmark')
         self.declare_parameter('map_start_z', 1.0)
+        self.declare_parameter('waist_to_exo_translation', [0.07, 0.0, 0.0])
+        self.declare_parameter('waist_to_exo_pitch_deg', 0.0)
+        self.declare_parameter('ground_truth_odom_topic', '/exoskeleton/odom')
+        self.declare_parameter('require_ground_truth_map', True)
+        self.declare_parameter('ground_truth_is_camera_pose', False)
         self.output_prefix = self.get_parameter('output_prefix').value
         self.map_start_z = float(self.get_parameter('map_start_z').value)
+        self.require_ground_truth_map = bool(
+            self.get_parameter('require_ground_truth_map').value
+        )
 
         self.estimated_trajectory = []
         self.gt_trajectory = []
-        self.waist_from_camera = None
+        self.waist_from_camera = _transform(
+            self.get_parameter('waist_to_exo_translation').value,
+            Rotation.from_euler(
+                'y', self.get_parameter('waist_to_exo_pitch_deg').value,
+                degrees=True,
+            ).as_quat(),
+        )
+        if self.get_parameter('ground_truth_is_camera_pose').value:
+            self.waist_from_camera = np.linalg.inv(_transform(
+                [0.0, 0.0, 0.0], [0.5, -0.5, 0.5, -0.5]
+            ))
         self.estimated_map = None
         self.gt_map = None
         self.estimated_map_frame = None
+        self.map_from_odom = None
         self.gt_map_frame = None
         self.first_gt_pose = None
         self.visualization_tf_sent = False
@@ -225,7 +339,8 @@ class BenchmarkEvaluatorNode(Node):
             Odometry, '/exo_rtabmap/odom', self._estimated_odom, qos_profile_sensor_data
         )
         self.create_subscription(
-            Odometry, '/exoskeleton/odom', self._gt_odom, qos_profile_sensor_data
+            Odometry, self.get_parameter('ground_truth_odom_topic').value,
+            self._gt_odom, qos_profile_sensor_data
         )
         self.create_subscription(
             PointCloud2, '/exo_rtabmap/cloud_map', self._estimated_map,
@@ -240,26 +355,38 @@ class BenchmarkEvaluatorNode(Node):
         self.create_subscription(
             TFMessage, '/ground_truth/tf', self._gt_dynamic, qos_profile_sensor_data
         )
+        self.create_subscription(
+            TFMessage, '/tf', self._estimated_tf, qos_profile_sensor_data
+        )
         self.create_service(Trigger, '~/finalize', self._finalize)
 
     @staticmethod
     def _pose(message):
         stamp = message.header.stamp
         pose = message.pose.pose
+        position = np.array([pose.position.x, pose.position.y, pose.position.z])
+        quaternion = np.array([
+            pose.orientation.x, pose.orientation.y,
+            pose.orientation.z, pose.orientation.w,
+        ])
+        norm = np.linalg.norm(quaternion)
+        if not np.isfinite(position).all() or not np.isfinite(norm) or norm < 1e-12:
+            return None
         return (
             stamp.sec + stamp.nanosec * 1e-9,
-            np.array([pose.position.x, pose.position.y, pose.position.z]),
-            np.array([
-                pose.orientation.x, pose.orientation.y,
-                pose.orientation.z, pose.orientation.w,
-            ]),
+            position,
+            quaternion / norm,
         )
 
     def _estimated_odom(self, message):
-        self.estimated_trajectory.append(self._pose(message))
+        pose = self._pose(message)
+        if pose is not None:
+            self.estimated_trajectory.append(pose)
 
     def _gt_odom(self, message):
         pose = self._pose(message)
+        if pose is None:
+            return
         self.gt_trajectory.append(pose)
         if self.first_gt_pose is None:
             self.first_gt_pose = pose
@@ -298,6 +425,15 @@ class BenchmarkEvaluatorNode(Node):
         self.gt_tf_broadcaster.sendTransform([
             self._prefixed_gt_transform(transform) for transform in message.transforms
         ])
+
+    def _estimated_tf(self, message):
+        for transform in message.transforms:
+            if transform.header.frame_id == 'map' and transform.child_frame_id == 'odom':
+                value = transform.transform
+                self.map_from_odom = _transform(
+                    [value.translation.x, value.translation.y, value.translation.z],
+                    [value.rotation.x, value.rotation.y, value.rotation.z, value.rotation.w],
+                )
 
     @staticmethod
     def _prefixed_gt_transform(transform):
@@ -350,19 +486,36 @@ class BenchmarkEvaluatorNode(Node):
     def evaluate(self):
         if self.waist_from_camera is None:
             raise ValueError('Missing waist_link -> front_camera_link ground-truth TF')
-        if self.estimated_map is None or self.gt_map is None:
+        has_maps = self.estimated_map is not None and self.gt_map is not None
+        if self.require_ground_truth_map and not has_maps:
             raise ValueError('Missing estimated or ground-truth map')
-        if self.estimated_map_frame not in ('map', 'odom'):
+        if has_maps and self.estimated_map_frame not in ('map', 'odom'):
             raise ValueError(f'Unexpected estimated map frame: {self.estimated_map_frame}')
-        if self.gt_map_frame != 'world':
+        if has_maps and self.gt_map_frame != 'world':
             raise ValueError(f'Unexpected ground-truth map frame: {self.gt_map_frame}')
 
         matched = match_trajectories(
-            self.estimated_trajectory, self.gt_trajectory, self.waist_from_camera
+            self.estimated_trajectory, self.gt_trajectory, self.waist_from_camera,
+            max_interpolation_gap=1.0,
         )
         trajectory, rotation, translation, aligned_positions = trajectory_metrics(matched)
-        aligned_map = self.estimated_map @ rotation.T + translation
-        mapping = cloud_metrics(aligned_map, self.gt_map)
+        sim_trajectory, scale, sim_rotation, sim_translation, _ = (
+            similarity_trajectory_metrics(matched)
+        )
+        mapping = sim_mapping = None
+        if has_maps:
+            estimated_map = self.estimated_map
+            if self.estimated_map_frame == 'map':
+                if self.map_from_odom is None:
+                    raise ValueError('Missing final map -> odom transform')
+                odom_from_map = np.linalg.inv(self.map_from_odom)
+                estimated_map = (
+                    estimated_map @ odom_from_map[:3, :3].T + odom_from_map[:3, 3]
+                )
+            aligned_map = estimated_map @ rotation.T + translation
+            mapping = cloud_metrics(aligned_map, self.gt_map)
+            sim_map = scale * (estimated_map @ sim_rotation.T) + sim_translation
+            sim_mapping = cloud_metrics(sim_map, self.gt_map)
 
         result = {
             'trajectory': trajectory,
@@ -370,6 +523,15 @@ class BenchmarkEvaluatorNode(Node):
             'alignment': {
                 'rotation': rotation.tolist(),
                 'translation_m': translation.tolist(),
+            },
+            'sim3_diagnostic': {
+                'trajectory': sim_trajectory,
+                'map': sim_mapping,
+                'alignment': {
+                    'scale': scale,
+                    'rotation': sim_rotation.tolist(),
+                    'translation_m': sim_translation.tolist(),
+                },
             },
         }
         output_dir = os.path.dirname(self.output_prefix)

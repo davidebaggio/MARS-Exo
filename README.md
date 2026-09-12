@@ -144,6 +144,17 @@ Playback is one-shot at `0.3x`, with IMU and debug point clouds disabled by defa
 ./run.sh [--rate RATE] [--imu] [--debug-pcl] [--loop] [bag_path]
 ```
 
+Run the three exoskeleton recordings at window sizes 1, 2, 4 and 6 without
+RViz, then perform all offline VGGT cloud evaluations and generate reports:
+
+```bash
+./run_all_verified_evaluations.sh
+```
+
+It writes a separate batch under `metrics/batch_windows/` and leaves existing
+`metrics/pipeline/` and `metrics/eval/` results untouched. Use `--rate RATE`
+to change pipeline playback speed.
+
 `run.sh` builds the package, sources the workspace, fixes Python shebangs, waits for the VGGT subscriptions to be ready, starts `/clock` playback, writes metrics under `metrics/pipeline/`, and opens `rviz/pipeline.rviz`. Metrics use `metrics_X_Y_W_Z`, where `X_Y_W` is the numeric dataset suffix and `Z` is `sliding_window_size`; rerunning the same configuration replaces its outputs. When visible-cloud ground truth is present, it records the VGGT cloud, ground-truth cloud, and odometry without evaluating them live. On shutdown it prints the `cloud_map_evaluation_launch.py` command that computes the CSV offline.
 
 When the bag contains `/ground_truth/global_map`, `run.sh` automatically enables

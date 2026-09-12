@@ -30,6 +30,8 @@ setup(
             'extrinsic_solver = exo_head_slam.extrinsic_solver_node:main',
             'pointcloud_publisher = exo_head_slam.pointcloud_publisher_node:main',
             'cloud_map_evaluator = exo_head_slam.cloud_map_evaluator_node:main',
+            'benchmark_evaluator = exo_head_slam.benchmark_evaluator_node:main',
+            'sequence_pair_adapter = exo_head_slam.sequence_pair_adapter_node:main',
         ],
     },
 )

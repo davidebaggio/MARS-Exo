@@ -3,6 +3,7 @@ from launch.actions import IncludeLaunchDescription
 from launch.actions import LogInfo
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
 from launch.substitutions import PathJoinSubstitution, LaunchConfiguration, PythonExpression
 from launch_ros.substitutions import FindPackageShare
@@ -40,6 +41,8 @@ def generate_launch_description():
     gt_parent_frame = LaunchConfiguration('gt_parent_frame')
     gt_child_frame_arg = DeclareLaunchArgument('gt_child_frame', default_value='')
     gt_child_frame = LaunchConfiguration('gt_child_frame')
+    gt_tf_topic_arg = DeclareLaunchArgument('gt_tf_topic', default_value='')
+    gt_tf_topic = LaunchConfiguration('gt_tf_topic')
 
     exo_pitch_deg_arg = DeclareLaunchArgument('exo_pitch_deg', default_value='0')
     exo_pitch_deg = LaunchConfiguration('exo_pitch_deg')
@@ -81,7 +84,42 @@ def generate_launch_description():
     )
     exoskeleton_dataset = LaunchConfiguration('exoskeleton_dataset')
 
+    coupled_sequence_dataset_arg = DeclareLaunchArgument(
+        'coupled_sequence_dataset',
+        default_value='false',
+        description='Pair adjacent frames from a single-camera RGB-D sequence'
+    )
+    coupled_sequence_dataset = LaunchConfiguration('coupled_sequence_dataset')
+
+    tum_ground_truth_arg = DeclareLaunchArgument(
+        'tum_ground_truth',
+        default_value='false',
+        description='Evaluate against /ground_truth/odom from a TUM bag'
+    )
+    tum_ground_truth = LaunchConfiguration('tum_ground_truth')
+
+    benchmark_output_prefix_arg = DeclareLaunchArgument(
+        'benchmark_output_prefix',
+        default_value='metrics/eval/benchmark',
+        description='Output prefix for trajectory and map benchmark files',
+    )
+    benchmark_output_prefix = LaunchConfiguration('benchmark_output_prefix')
+
+    sliding_window_size_arg = DeclareLaunchArgument(
+        'sliding_window_size', default_value='4',
+        description='VGGT extrinsic-solver temporal window size',
+    )
+    sliding_window_size = LaunchConfiguration('sliding_window_size')
+
     common_params = {'use_sim_time': use_sim_time}
+
+    sequence_pair_adapter = Node(
+        package='exo_head_slam',
+        executable='sequence_pair_adapter',
+        name='sequence_pair_adapter',
+        parameters=[common_params],
+        condition=IfCondition(coupled_sequence_dataset),
+    )
 
     head_depth_preprocessor = Node(
         package='exo_head_slam',
@@ -111,8 +149,23 @@ def generate_launch_description():
         name='extrinsic_solver',
         parameters=[common_config, exo_config, common_params, {
             'metrics_csv_path': metrics_csv_path,
+            'sliding_window_size': ParameterValue(sliding_window_size, value_type=int),
             'gt_parent_frame': gt_parent_frame,
             'gt_child_frame': gt_child_frame,
+            'gt_tf_topic': gt_tf_topic,
+            'validate_rig_geometry': ParameterValue(
+                PythonExpression([
+                    "'", coupled_sequence_dataset, "'.lower() != 'true'"
+                ]),
+                value_type=bool,
+            ),
+            'min_solver_interval': ParameterValue(
+                PythonExpression([
+                    "0.0 if '", coupled_sequence_dataset,
+                    "'.lower() == 'true' else 0.2"
+                ]),
+                value_type=float,
+            ),
         }],
     )
 
@@ -155,6 +208,7 @@ def generate_launch_description():
         metrics_csv_path_arg,
         gt_parent_frame_arg,
         gt_child_frame_arg,
+        gt_tf_topic_arg,
         exo_pitch_deg_arg,
         head_pitch_deg_arg,
         use_imu_arg,
@@ -162,6 +216,10 @@ def generate_launch_description():
         filtered_imu_topic_arg,
         map_start_z_arg,
         exoskeleton_dataset_arg,
+        coupled_sequence_dataset_arg,
+        tum_ground_truth_arg,
+        benchmark_output_prefix_arg,
+        sliding_window_size_arg,
     ]
 
     # The dataset uses camera-link names while the pipeline owns exo_link/head_link.
@@ -180,7 +238,12 @@ def generate_launch_description():
                 '--qz', quaternion[2], '--qw', quaternion[3],
                 '--frame-id', parent, '--child-frame-id', child,
             ],
-            condition=IfCondition(exoskeleton_dataset),
+            condition=IfCondition(
+                exoskeleton_dataset if name == 'exo_imu_tf' else PythonExpression([
+                    "'", exoskeleton_dataset, "'.lower() == 'true' or '",
+                    coupled_sequence_dataset, "'.lower() == 'true'",
+                ])
+            ),
         ))
 
     for name, child, translation, pitch_deg in (
@@ -215,13 +278,46 @@ def generate_launch_description():
                     'imu_topic': imu_topic,
                     'filtered_imu_topic': filtered_imu_topic,
                     'map_start_z': map_start_z,
+                    'coupled_sequence_dataset': coupled_sequence_dataset,
                 }.items(),
             )
         )
+        actions.append(Node(
+            package='exo_head_slam',
+            executable='benchmark_evaluator',
+            name='benchmark_evaluator',
+            parameters=[{
+                'use_sim_time': use_sim_time,
+                'output_prefix': benchmark_output_prefix,
+                'map_start_z': ParameterValue(map_start_z, value_type=float),
+                'waist_to_exo_pitch_deg': ParameterValue(
+                    exo_pitch_deg, value_type=float
+                ),
+                'ground_truth_odom_topic': PythonExpression([
+                    "'/ground_truth/odom' if '", tum_ground_truth,
+                    "'.lower() == 'true' else '/exoskeleton/odom'",
+                ]),
+                'ground_truth_is_camera_pose': ParameterValue(
+                    tum_ground_truth, value_type=bool
+                ),
+                'require_ground_truth_map': ParameterValue(
+                    PythonExpression([
+                        "'", tum_ground_truth, "'.lower() != 'true'"
+                    ]),
+                    value_type=bool,
+                ),
+            }],
+            condition=IfCondition(PythonExpression([
+                "'", exoskeleton_dataset, "'.lower() == 'true' or '",
+                tum_ground_truth, "'.lower() == 'true'",
+            ])),
+            output='screen',
+        ))
     except PackageNotFoundError:
         actions.append(LogInfo(msg='Required RTAB-Map packages not found, skipping RTAB-Map launch.'))
 
     actions.extend([
+        sequence_pair_adapter,
         head_depth_preprocessor,
         exo_depth_preprocessor,
         semantic_masker,

@@ -5,7 +5,8 @@ import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch_ros.actions import Node
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
+from launch_ros.parameter_descriptions import ParameterValue
 from launch.actions import DeclareLaunchArgument, TimerAction
 from launch.conditions import IfCondition
 
@@ -56,6 +57,11 @@ def generate_launch_description():
     )
     map_start_z = LaunchConfiguration('map_start_z')
 
+    coupled_sequence_dataset_arg = DeclareLaunchArgument(
+        'coupled_sequence_dataset', default_value='false'
+    )
+    coupled_sequence_dataset = LaunchConfiguration('coupled_sequence_dataset')
+
     pkg_share = get_package_share_directory('exo_head_slam')
     config_dir = os.path.join(pkg_share, 'config')
 
@@ -69,6 +75,12 @@ def generate_launch_description():
     rgb_topic = exo_params.pop('rgb_topic')
     depth_topic = exo_params.pop('depth_topic')
     camera_info_topic = exo_params.pop('camera_info_topic')
+    exo_params['approx_sync'] = ParameterValue(
+        PythonExpression([
+            "'", coupled_sequence_dataset, "'.lower() != 'true'"
+        ]),
+        value_type=bool,
+    )
 
     # Base parameters for all nodes
     base_params = {
@@ -165,6 +177,7 @@ def generate_launch_description():
         imu_topic_arg,
         filtered_imu_topic_arg,
         map_start_z_arg,
+        coupled_sequence_dataset_arg,
         viz_ground_to_map_tf,
         imu_filter,
         exo_odometry,

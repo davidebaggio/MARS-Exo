@@ -41,6 +41,16 @@ def _launch_evaluation(context):
             'Evaluation bag has no exo_pitch_deg metadata; pass exo_pitch_deg for old bags.'
         )
 
+    ground_truth_odom_topic = metadata.custom_data.get(
+        'ground_truth_odom_topic', '/exoskeleton/odom'
+    )
+    ground_truth_cloud_is_local = metadata.custom_data.get(
+        'ground_truth_cloud_is_local', 'false'
+    ).lower() == 'true'
+    ground_truth_is_camera_pose = metadata.custom_data.get(
+        'ground_truth_is_camera_pose', 'false'
+    ).lower() == 'true'
+
     evaluator = Node(
         package='exo_head_slam',
         executable='cloud_map_evaluator',
@@ -51,6 +61,9 @@ def _launch_evaluation(context):
             'use_sim_time': True,
             'metrics_csv_path': metrics_csv_path,
             'waist_to_exo_pitch_deg': float(exo_pitch_deg),
+            'ground_truth_odom_topic': ground_truth_odom_topic,
+            'ground_truth_cloud_is_local': ground_truth_cloud_is_local,
+            'ground_truth_is_camera_pose': ground_truth_is_camera_pose,
             'global': global_mode,
         }],
     )

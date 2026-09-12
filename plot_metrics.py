@@ -2,20 +2,21 @@
 import glob
 import os
 import sys
-import pandas as pd
+import matplotlib
 import numpy as np
+import pandas as pd
 
-# Support headless systems (like docker or ssh) without crashing
-if not os.environ.get('DISPLAY', '').strip():
-    import matplotlib
-    matplotlib.use('Agg')
+matplotlib.use('Agg')
 
 import matplotlib.pyplot as plt
 
 
+EVAL_DIR = os.environ.get('EVAL_DIR', 'metrics/eval')
+
+
 def plot_cloud_metrics(csv_path, df):
     name = os.path.splitext(os.path.basename(csv_path))[0]
-    eval_dir = 'metrics/eval'
+    eval_dir = EVAL_DIR
     os.makedirs(eval_dir, exist_ok=True)
     output_image = os.path.join(eval_dir, f'{name}_plot.png')
     output_text = os.path.join(eval_dir, f'{name}_summary.txt')
@@ -30,7 +31,7 @@ def plot_cloud_metrics(csv_path, df):
     bars = ax.bar(labels, [cloud[column] for column in columns], color='#3498db')
     ax.bar_label(bars, fmt='%.3f')
     ax.set_ylabel('Distance (m)')
-    ax.set_title(f'Mean metrics over {len(df)} evaluation row(s)\nF-score: {cloud["fscore"]:.3f}')
+    ax.set_title(f'Mean metrics over {len(df)} evaluation row(s)\nF@10cm: {cloud["fscore"]:.3f}')
     ax.grid(True, axis='y', linestyle='--', alpha=0.5)
 
     maps_path = f'{os.path.splitext(csv_path)[0]}_maps.npz'
@@ -50,22 +51,12 @@ def plot_cloud_metrics(csv_path, df):
         o3d.io.write_point_cloud(output_cloud, combined)
         print(f'Open3D cloud successfully saved to: {os.path.abspath(output_cloud)}')
 
-        if os.environ.get('DISPLAY', '').strip():
-            extent = np.ptp(np.vstack((predicted, ground_truth)), axis=0).max()
-            axes = o3d.geometry.TriangleMesh.create_coordinate_frame(size=max(0.1, extent * 0.1))
-            visualizer = o3d.visualization.Visualizer()
-            visualizer.create_window(
-                window_name='Global maps — green: ground truth, red: VGGT predicted')
-            for geometry in (gt_cloud, predicted_cloud, axes):
-                visualizer.add_geometry(geometry)
-            visualizer.get_render_option().point_size *= 0.5
-            visualizer.run()
-            visualizer.destroy_window()
     else:
         print(f'Global map data not found: {maps_path}. Rerun offline evaluation to create it.')
 
     plt.tight_layout()
     plt.savefig(output_image, dpi=150)
+    plt.close(fig)
     summary = [
         'VGGT VISIBLE CLOUD VS GROUND TRUTH',
         f'Metrics CSV: {csv_path}',
@@ -76,8 +67,12 @@ def plot_cloud_metrics(csv_path, df):
         f'Completeness mean: {cloud["completeness_mean"]:.4f} m',
         f'Completeness RMSE: {cloud["completeness_rmse"]:.4f} m',
         f'Chamfer distance: {cloud["chamfer"]:.4f} m',
-        f'F-score: {cloud["fscore"]:.4f}',
+        f'F@10cm: {cloud["fscore"]:.4f}',
     ]
+    for threshold in ('02', '05', '10'):
+        column = f'fscore_{threshold}cm'
+        if column in cloud:
+            summary.append(f'F@{int(threshold)}cm: {cloud[column]:.4f}')
     with open(output_text, 'w') as stream:
         stream.write('\n'.join(summary))
     print(f'Plot successfully saved to: {os.path.abspath(output_image)}')
@@ -119,7 +114,7 @@ def main(csv_path):
     cloud_csv_path = f'{os.path.splitext(csv_path)[0]}_cloud.csv'
     cloud_df = pd.read_csv(cloud_csv_path) if os.path.exists(cloud_csv_path) else None
 
-    eval_dir = 'metrics/eval'
+    eval_dir = EVAL_DIR
     os.makedirs(eval_dir, exist_ok=True)
 
     output_image = os.path.join(eval_dir, f"{csv_name_no_ext}_plot.png")
@@ -265,6 +260,7 @@ def main(csv_path):
     plt.tight_layout()
 
     plt.savefig(output_image, dpi=150)
+    plt.close(fig)
     print(f"Plot successfully saved to: {os.path.abspath(output_image)}")
 
     # Compute Stats and Generate Text Summary
@@ -412,8 +408,12 @@ def main(csv_path):
             f"Completeness Mean: {cloud['completeness_mean']:>8.4f} m",
             f"Completeness RMSE: {cloud['completeness_rmse']:>8.4f} m",
             f"Chamfer Distance:  {cloud['chamfer']:>8.4f} m",
-            f"F-score:           {cloud['fscore']:>8.4f}",
+            f"F@10cm:            {cloud['fscore']:>8.4f}",
         ])
+        for threshold in ('02', '05', '10'):
+            column = f'fscore_{threshold}cm'
+            if column in cloud:
+                summary_lines.append(f"F@{int(threshold)}cm:            {cloud[column]:>8.4f}")
 
     try:
         with open(output_text, 'w') as f:
@@ -430,5 +430,3 @@ if __name__ == '__main__':
         print(f'Plotting: {", ".join(paths)}')
     for path in paths:
         main(path)
-    if os.environ.get('DISPLAY', '').strip():
-        plt.show()

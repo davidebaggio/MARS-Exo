@@ -24,13 +24,15 @@ def test_global_cloud_plot(tmp_path, monkeypatch):
     points = np.array([[0, 0, 0], [1, 1, 1]], dtype=np.float32)
     np.savez_compressed(tmp_path / 'cloud_global_maps.npz', predicted=points,
                         ground_truth=points)
-    metrics = cloud_metrics(points, points, 0.1)
+    metrics = cloud_metrics(points, points, 0.1, extra_thresholds=(0.02, 0.05, 0.10))
+    assert all(metrics[f'fscore_{threshold:02d}cm'] == 1.0 for threshold in (2, 5, 10))
     frame = pd.DataFrame([{'voxel_size': 0.1, **metrics}])
 
     plot_cloud_metrics(str(csv_path), frame)
 
     assert (tmp_path / 'metrics/eval/cloud_global_plot.png').exists()
     assert (tmp_path / 'metrics/eval/cloud_global_maps.ply').exists()
+    assert 'F@2cm: 1.0000' in (tmp_path / 'metrics/eval/cloud_global_summary.txt').read_text()
 
 
 def test_latest_metrics_selects_regular_and_global(tmp_path):

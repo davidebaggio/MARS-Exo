@@ -15,6 +15,9 @@ from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
 
 
+F_SCORE_THRESHOLDS = (0.02, 0.05, 0.10)
+
+
 def transform_matrix(translation, quaternion):
     matrix = np.eye(4)
     matrix[:3, :3] = Rotation.from_quat(quaternion).as_matrix()
@@ -35,12 +38,12 @@ def merge_voxels(voxels, points, voxel_size):
         voxels.setdefault(key, point)
 
 
-def cloud_metrics(estimated, ground_truth, threshold):
+def cloud_metrics(estimated, ground_truth, threshold, extra_thresholds=()):
     est_to_gt = cKDTree(ground_truth).query(estimated, workers=-1)[0]
     gt_to_est = cKDTree(estimated).query(ground_truth, workers=-1)[0]
     precision = float(np.mean(est_to_gt <= threshold))
     recall = float(np.mean(gt_to_est <= threshold))
-    return {
+    result = {
         'accuracy_mean': float(np.mean(est_to_gt)),
         'accuracy_rmse': float(np.sqrt(np.mean(est_to_gt ** 2))),
         'completeness_mean': float(np.mean(gt_to_est)),
@@ -48,6 +51,14 @@ def cloud_metrics(estimated, ground_truth, threshold):
         'chamfer': float((np.mean(est_to_gt) + np.mean(gt_to_est)) / 2.0),
         'fscore': 2.0 * precision * recall / (precision + recall) if precision + recall else 0.0,
     }
+    for extra in extra_thresholds:
+        extra_precision = float(np.mean(est_to_gt <= extra))
+        extra_recall = float(np.mean(gt_to_est <= extra))
+        result[f'fscore_{round(extra * 100):02d}cm'] = (
+            2.0 * extra_precision * extra_recall / (extra_precision + extra_recall)
+            if extra_precision + extra_recall else 0.0
+        )
+    return result
 
 
 class CloudMapEvaluatorNode(Node):
@@ -61,6 +72,8 @@ class CloudMapEvaluatorNode(Node):
         self.declare_parameter('fscore_threshold', 0.1)
         self.declare_parameter('waist_to_exo_translation', [0.07, 0.0, 0.0])
         self.declare_parameter('waist_to_exo_pitch_deg', 0.0)
+        self.declare_parameter('ground_truth_cloud_is_local', False)
+        self.declare_parameter('ground_truth_is_camera_pose', False)
         self.declare_parameter('global', True)
 
         self.metrics_csv_path = self.get_parameter('metrics_csv_path').value
@@ -74,6 +87,9 @@ class CloudMapEvaluatorNode(Node):
         self.voxel_size = float(self.get_parameter('voxel_size').value)
         self.fscore_threshold = float(self.get_parameter('fscore_threshold').value)
         self.global_mode = global_flag or self.get_parameter('global').value
+        self.ground_truth_cloud_is_local = bool(
+            self.get_parameter('ground_truth_cloud_is_local').value
+        )
         self.estimated_voxels = {}
         self.ground_truth_voxels = {}
         self.last_ground_truth_msg = None
@@ -82,6 +98,9 @@ class CloudMapEvaluatorNode(Node):
             Rotation.from_euler(
                 'y', self.get_parameter('waist_to_exo_pitch_deg').value, degrees=True).as_quat(),
         )
+        self.optical_from_exo = np.linalg.inv(transform_matrix(
+            [0.0, 0.0, 0.0], [0.5, -0.5, 0.5, -0.5]
+        )) if self.get_parameter('ground_truth_is_camera_pose').value else None
         vggt_sub = message_filters.Subscriber(
             self, PointCloud2, self.get_parameter('vggt_cloud_topic').value,
             qos_profile=qos_profile_sensor_data)
@@ -106,24 +125,46 @@ class CloudMapEvaluatorNode(Node):
             msg, field_names=['x', 'y', 'z'], skip_nans=True).astype(np.float64)
 
     def evaluate(self, vggt_msg, ground_truth_msg, odom_msg):
-        if ground_truth_msg.header.frame_id != odom_msg.header.frame_id:
+        if self.ground_truth_cloud_is_local:
+            if ground_truth_msg.header.frame_id != vggt_msg.header.frame_id:
+                self.get_logger().error(
+                    f'Cannot compare local frames {vggt_msg.header.frame_id!r} '
+                    f'and {ground_truth_msg.header.frame_id!r}.')
+                return
+        elif ground_truth_msg.header.frame_id != odom_msg.header.frame_id:
             self.get_logger().error(
                 f'Cannot compare frames {ground_truth_msg.header.frame_id!r} '
                 f'and {odom_msg.header.frame_id!r}.')
             return
         pose = odom_msg.pose.pose
-        world_to_waist = transform_matrix(
+        world_from_pose = transform_matrix(
             [pose.position.x, pose.position.y, pose.position.z],
             [pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w],
         )
-        world_to_exo = world_to_waist @ self.waist_to_exo
+        world_from_exo = world_from_pose @ (
+            self.optical_from_exo if self.optical_from_exo is not None
+            else self.waist_to_exo
+        )
         estimated = self.points(vggt_msg)
         estimated = estimated[np.isfinite(estimated).all(axis=1)]
-        estimated = estimated @ world_to_exo[:3, :3].T + world_to_exo[:3, 3]
         ground_truth = self.points(ground_truth_msg)
+        local_estimated = estimated
+        local_ground_truth = ground_truth
+        if not self.ground_truth_cloud_is_local:
+            estimated = (
+                estimated @ world_from_exo[:3, :3].T + world_from_exo[:3, 3]
+            )
         if self.global_mode:
-            merge_voxels(self.estimated_voxels, estimated, self.voxel_size)
-            merge_voxels(self.ground_truth_voxels, ground_truth, self.voxel_size)
+            global_estimated = (
+                local_estimated @ world_from_exo[:3, :3].T + world_from_exo[:3, 3]
+                if self.ground_truth_cloud_is_local else estimated
+            )
+            global_ground_truth = (
+                local_ground_truth @ world_from_exo[:3, :3].T + world_from_exo[:3, 3]
+                if self.ground_truth_cloud_is_local else ground_truth
+            )
+            merge_voxels(self.estimated_voxels, global_estimated, self.voxel_size)
+            merge_voxels(self.ground_truth_voxels, global_ground_truth, self.voxel_size)
             self.last_ground_truth_msg = ground_truth_msg
 
         estimated = voxel_downsample(estimated, self.voxel_size)
@@ -131,7 +172,8 @@ class CloudMapEvaluatorNode(Node):
         if len(estimated) == 0 or len(ground_truth) == 0:
             self.get_logger().warn('Skipping empty VGGT or ground-truth visible cloud.')
             return
-        metrics = cloud_metrics(estimated, ground_truth, self.fscore_threshold)
+        metrics = cloud_metrics(
+            estimated, ground_truth, self.fscore_threshold, F_SCORE_THRESHOLDS)
         self.write_metrics(ground_truth_msg, len(estimated), len(ground_truth), metrics)
         self.get_logger().info(
             f'Visible cloud evaluation: Chamfer={metrics["chamfer"]:.3f} m, '
@@ -147,7 +189,8 @@ class CloudMapEvaluatorNode(Node):
             return
         self.get_logger().info(
             f'Finalizing global maps: {len(estimated)}/{len(ground_truth)} points...')
-        metrics = cloud_metrics(estimated, ground_truth, self.fscore_threshold)
+        metrics = cloud_metrics(
+            estimated, ground_truth, self.fscore_threshold, F_SCORE_THRESHOLDS)
         root, extension = os.path.splitext(self.metrics_csv_path)
         self.write_metrics(
             self.last_ground_truth_msg, len(estimated), len(ground_truth), metrics,

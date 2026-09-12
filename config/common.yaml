@@ -25,6 +25,7 @@ extrinsic_solver:
     exo_frame_id: "exo_link"
     tf_filter_alpha: 0.5
     sliding_window_size: 4
+    validate_rig_geometry: true # fixed head/exo baseline and relative-height bounds
     # VGGT depth-head confidence gating
     depth_conf_mode: "percentile" # "percentile" | "absolute"
     depth_conf_percentile: 25.0 # drop bottom N% of pixels by conf when mode=percentile

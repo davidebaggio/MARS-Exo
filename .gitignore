@@ -44,3 +44,7 @@ thesis_proposal*
 *.npz
 *.ply
 *.mcap
+
+metrics/**/*.txt
+metrics/**/*.json
+metrics/**/*.yaml

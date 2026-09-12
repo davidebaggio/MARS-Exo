@@ -26,6 +26,7 @@ After `colcon build`, the generated shim scripts in `install/exo_head_slam/lib/e
 | `extrinsic_solver` | `extrinsic_solver_node.py` | VGGT-1B joint extrinsic + depth estimation, with depth-head confidence gating |
 | `pointcloud_publisher` | `pointcloud_publisher_node.py` | Debug per-camera XYZRGB PointCloud2 from RGB-D (behind `publish_debug_pcl` flag) |
 | `cloud_map_evaluator` | `cloud_map_evaluator_node.py` | Offline VGGT evaluation against `/ground_truth/visible_cloud` |
+| `benchmark_evaluator` | `benchmark_evaluator_node.py` | Final RTAB trajectory/map comparison with SE(3) and Sim(3) reports |
 
 ## Launch
 

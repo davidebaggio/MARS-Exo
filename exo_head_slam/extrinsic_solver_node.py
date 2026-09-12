@@ -3,6 +3,7 @@ import csv
 import os
 import sys
 import time
+from collections import deque
 
 import numpy as np
 import cv2
@@ -60,6 +61,7 @@ class ExtrinsicSolverNode(Node):
         self.declare_parameter('min_solver_interval', 0.2)
         self.declare_parameter('max_trans_jump', 0.3)
         self.declare_parameter('max_rot_jump', 0.5)
+        self.declare_parameter('validate_rig_geometry', True)
 
         # VGGT depth-head confidence gating
         self.declare_parameter('depth_conf_mode', 'percentile')       # "percentile" | "absolute"
@@ -75,6 +77,7 @@ class ExtrinsicSolverNode(Node):
         self.declare_parameter('gt_parent_frame', '')
         self.declare_parameter('gt_child_frame', '')
         self.declare_parameter('gt_tf_static_topic', '')
+        self.declare_parameter('gt_tf_topic', '')
 
         # Get values
         self.head_rgb_topic = self.get_parameter('head_rgb_topic').value
@@ -88,6 +91,9 @@ class ExtrinsicSolverNode(Node):
         self.min_solver_interval = float(self.get_parameter('min_solver_interval').value)
         self.max_trans_jump = float(self.get_parameter('max_trans_jump').value)
         self.max_rot_jump = float(self.get_parameter('max_rot_jump').value)
+        self.validate_rig_geometry = bool(
+            self.get_parameter('validate_rig_geometry').value
+        )
 
         self.depth_conf_mode = str(self.get_parameter('depth_conf_mode').value).lower()
         self.depth_conf_percentile = float(self.get_parameter('depth_conf_percentile').value)
@@ -102,6 +108,7 @@ class ExtrinsicSolverNode(Node):
         self.gt_parent_frame = self.get_parameter('gt_parent_frame').value
         self.gt_child_frame = self.get_parameter('gt_child_frame').value
         self.gt_tf_static_topic = self.get_parameter('gt_tf_static_topic').value
+        self.gt_tf_topic = self.get_parameter('gt_tf_topic').value
         if self.metrics_enabled:
             dirname = os.path.dirname(self.metrics_csv_path)
             if dirname:
@@ -114,7 +121,9 @@ class ExtrinsicSolverNode(Node):
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
         self.gt_tf_buffer = None
         self.gt_tf_static_sub = None
-        if self.gt_tf_static_topic:
+        self.gt_tf_sub = None
+        self.gt_transforms = deque(maxlen=10_000)
+        if self.gt_tf_static_topic or self.gt_tf_topic:
             from rclpy.qos import (
                 DurabilityPolicy,
                 HistoryPolicy,
@@ -122,6 +131,7 @@ class ExtrinsicSolverNode(Node):
                 ReliabilityPolicy,
             )
             self.gt_tf_buffer = tf2_ros.Buffer()
+        if self.gt_tf_static_topic:
             self.gt_tf_static_sub = self.create_subscription(
                 TFMessage,
                 self.gt_tf_static_topic,
@@ -132,6 +142,10 @@ class ExtrinsicSolverNode(Node):
                     history=HistoryPolicy.KEEP_LAST,
                     depth=1,
                 ),
+            )
+        if self.gt_tf_topic:
+            self.gt_tf_sub = self.create_subscription(
+                TFMessage, self.gt_tf_topic, self._ingest_gt_tf, 10_000
             )
 
         # State
@@ -244,6 +258,11 @@ class ExtrinsicSolverNode(Node):
     def _ingest_gt_static_tf(self, msg: TFMessage):
         for transform in msg.transforms:
             self.gt_tf_buffer.set_transform_static(transform, 'ground_truth_bag')
+
+    def _ingest_gt_tf(self, msg: TFMessage):
+        for transform in msg.transforms:
+            self.gt_tf_buffer.set_transform(transform, 'ground_truth_bag')
+            self.gt_transforms.append(transform)
 
     def _conf_threshold(self, conf_np: np.ndarray) -> float:
         if self.depth_conf_mode == "absolute":
@@ -444,7 +463,7 @@ class ExtrinsicSolverNode(Node):
 
                     valid_tf = True
                     dist = np.linalg.norm(new_t)
-                    if not (0.2 <= dist <= 2.2):
+                    if self.validate_rig_geometry and not (0.2 <= dist <= 2.2):
                         self.get_logger().warn(f"Rejecting transform: distance {dist:.2f} m out of bounds [0.2, 2.2]")
                         valid_tf = False
                         self._log_metrics(stamp_sec, 'OUT_OF_BOUNDS', scale=scale,
@@ -452,7 +471,7 @@ class ExtrinsicSolverNode(Node):
                                           exo_depth_rmse=exo_depth_rmse, exo_depth_mae=exo_depth_mae,
                                           head_conf_stats=head_conf_stats, exo_conf_stats=exo_conf_stats,
                                           conf_thr=conf_thr, new_t=new_t, new_q=new_q)
-                    elif not (0.1 <= new_t[2] <= 1.5):
+                    elif self.validate_rig_geometry and not (0.1 <= new_t[2] <= 1.5):
                         self.get_logger().warn(f"Rejecting transform: relative Z height {new_t[2]:.2f} m out of bounds [0.1, 1.5]")
                         valid_tf = False
                         self._log_metrics(stamp_sec, 'OUT_OF_BOUNDS', scale=scale,
@@ -661,10 +680,27 @@ class ExtrinsicSolverNode(Node):
 
         if self.gt_parent_frame and self.gt_child_frame and new_t is not None and new_q is not None:
             try:
-                gt_buffer = self.gt_tf_buffer or self.tf_buffer
-                gt_tf = gt_buffer.lookup_transform(
-                    self.gt_parent_frame, self.gt_child_frame, rclpy.time.Time()
-                )
+                candidates = [
+                    transform for transform in self.gt_transforms
+                    if transform.header.frame_id == self.gt_parent_frame
+                    and transform.child_frame_id == self.gt_child_frame
+                ]
+                if candidates:
+                    gt_tf = min(candidates, key=lambda transform: abs(
+                        transform.header.stamp.sec
+                        + transform.header.stamp.nanosec * 1e-9 - stamp_sec
+                    ))
+                    gt_time = (
+                        gt_tf.header.stamp.sec
+                        + gt_tf.header.stamp.nanosec * 1e-9
+                    )
+                    if abs(gt_time - stamp_sec) > 0.05:
+                        raise ValueError('No ground-truth pair transform within 0.05 s')
+                else:
+                    gt_buffer = self.gt_tf_buffer or self.tf_buffer
+                    gt_tf = gt_buffer.lookup_transform(
+                        self.gt_parent_frame, self.gt_child_frame, rclpy.time.Time()
+                    )
                 gt_mat = self.tf_to_matrix(gt_tf)
                 gt_t = gt_mat[:3, 3]
                 gt_r = gt_mat[:3, :3]

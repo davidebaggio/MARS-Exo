@@ -3,19 +3,29 @@ set -euo pipefail
 
 #DEFAULT_BAG="data/rosbag2_2026_06_11-15_25_14/rosbag2_2026_06_11-15_25_14_0.mcap"
 #DEFAULT_BAG="data/rosbag2_2026_06_11-15_31_00/rosbag2_2026_06_11-15_31_00_0.mcap"
-DEFAULT_BAG="data/rosbag2_2026_06_11-15_34_13/rosbag2_2026_06_11-15_34_13_0.mcap"
+#DEFAULT_BAG="data/rosbag2_2026_06_11-15_34_13/rosbag2_2026_06_11-15_34_13_0.mcap"
 #DEFAULT_BAG="data/exoskeleton_dataset_0_0_0/exoskeleton_dataset_0_0_0.mcap"
 #DEFAULT_BAG="data/exoskeleton_dataset_1_20_35/exoskeleton_dataset_1_20_35.mcap"
 #DEFAULT_BAG="data/exoskeleton_dataset_2_10_40/exoskeleton_dataset_2_10_40.mcap"
 
+#DEFAULT_BAG="data/TUM/rgbd_dataset_freiburg3_long_office_household_cloud.bag"
+#DEFAULT_BAG="data/TUM/rgbd_dataset_freiburg1_room_cloud.bag"
+DEFAULT_BAG="data/TUM/rgbd_dataset_freiburg2_large_with_loop_cloud.bag"
+
 PLAYBACK_RATE=0.6
-USE_IMU=true
+USE_IMU=false
 PUBLISH_DEBUG_PCL=false
 LOOP_PLAYBACK=false
+HEADLESS=false
+BUILD=true
 BAG_PATH=""
+METRICS_DIR="metrics/pipeline"
+EVAL_DIR="metrics/eval"
+SLIDING_WINDOW_OVERRIDE=""
+PLAYBACK_RATE_EXPLICIT=false
 
 usage() {
-	echo "Usage: $0 [--rate RATE] [--imu] [--debug-pcl] [--loop] [bag_path]"
+	echo "Usage: $0 [--rate RATE] [--window N] [--metrics-dir DIR] [--eval-dir DIR] [--imu] [--debug-pcl] [--loop] [--headless] [--no-build] [bag_path]"
 }
 
 while (( $# > 0 )); do
@@ -26,6 +36,27 @@ while (( $# > 0 )); do
 				exit 2
 			fi
 			PLAYBACK_RATE="$2"
+			PLAYBACK_RATE_EXPLICIT=true
+			shift 2
+			;;
+		--window)
+			if (( $# < 2 )) || [[ ! "$2" =~ ^[1-9][0-9]*$ ]]; then
+				echo "--window requires a positive integer" >&2
+				exit 2
+			fi
+			SLIDING_WINDOW_OVERRIDE="$2"
+			shift 2
+			;;
+		--metrics-dir|--eval-dir)
+			if (( $# < 2 )) || [[ "$2" != metrics/* ]]; then
+				echo "$1 must be a relative directory under metrics/" >&2
+				exit 2
+			fi
+			if [[ "$1" == --metrics-dir ]]; then
+				METRICS_DIR="$2"
+			else
+				EVAL_DIR="$2"
+			fi
 			shift 2
 			;;
 		--imu)
@@ -38,6 +69,14 @@ while (( $# > 0 )); do
 			;;
 		--loop)
 			LOOP_PLAYBACK=true
+			shift
+			;;
+		--headless)
+			HEADLESS=true
+			shift
+			;;
+		--no-build)
+			BUILD=false
 			shift
 			;;
 		-h|--help)
@@ -68,6 +107,8 @@ fi
 
 BAG_PATH="${BAG_PATH:-$DEFAULT_BAG}"
 EXOSKELETON_DATASET=false
+COUPLED_SEQUENCE_DATASET=false
+TUM_GROUND_TRUTH=false
 GT_LAUNCH_ARGS=()
 EXO_PITCH_DEG=0
 HEAD_PITCH_DEG=0
@@ -80,8 +121,34 @@ if [[ ! -e "$BAG_PATH" ]]; then
 	echo "Bag path not found: $BAG_PATH" >&2
 	exit 1
 fi
-BAG_NAME="$(basename "$BAG_PATH" .mcap)"
+if ! BAG_INFO="$(ros2 bag info "$BAG_PATH" 2>&1)"; then
+	echo "$BAG_INFO" >&2
+	exit 1
+fi
+if grep -q 'Topic: /camera/rgb/image_color | Type: sensor_msgs/msg/Image' <<<"$BAG_INFO" &&
+	! grep -q 'Topic: /camera/exo/color/image_raw | Type: sensor_msgs/msg/Image' <<<"$BAG_INFO"; then
+	for required_topic in /camera/depth/image /camera/rgb/camera_info; do
+		if ! grep -q "Topic: $required_topic |" <<<"$BAG_INFO"; then
+			echo "Single-camera bag missing required topic: $required_topic" >&2
+			exit 1
+		fi
+	done
+	COUPLED_SEQUENCE_DATASET=true
+fi
+if [[ "$COUPLED_SEQUENCE_DATASET" == true ]] &&
+	grep -q 'Topic: /ground_truth/odom | Type: nav_msgs/msg/Odometry' <<<"$BAG_INFO"; then
+	TUM_GROUND_TRUTH=true
+	GT_LAUNCH_ARGS=(gt_parent_frame:=gt_exo_link gt_child_frame:=gt_head_link \
+		gt_tf_topic:=/ground_truth/pair_tf)
+	if [[ "$PLAYBACK_RATE_EXPLICIT" == false ]]; then
+		PLAYBACK_RATE=0.02
+	fi
+fi
+BAG_NAME="$(basename "$BAG_PATH")"
+BAG_NAME="${BAG_NAME%.mcap}"
+BAG_NAME="${BAG_NAME%.bag}"
 SLIDING_WINDOW_SIZE="$(sed -nE 's/^[[:space:]]*sliding_window_size:[[:space:]]*([0-9]+).*/\1/p' config/common.yaml | head -n 1)"
+SLIDING_WINDOW_SIZE="${SLIDING_WINDOW_OVERRIDE:-$SLIDING_WINDOW_SIZE}"
 if [[ -z "$SLIDING_WINDOW_SIZE" ]]; then
 	echo "sliding_window_size not found in config/common.yaml" >&2
 	exit 1
@@ -96,8 +163,9 @@ else
 	DATASET_HEAD_PITCH=""
 fi
 RUN_ID="${DATASET_NUMBERS}_${SLIDING_WINDOW_SIZE}"
+BENCHMARK_OUTPUT_PREFIX="${EVAL_DIR}/benchmark_${RUN_ID}"
 
-if ros2 bag info "$BAG_PATH" 2>/dev/null | grep -q 'Topic: /exoskeleton/odom | Type: nav_msgs/msg/Odometry'; then
+if grep -q 'Topic: /exoskeleton/odom | Type: nav_msgs/msg/Odometry' <<<"$BAG_INFO"; then
 	EXOSKELETON_DATASET=true
 	GT_LAUNCH_ARGS=(gt_parent_frame:=gt_exo_link gt_child_frame:=gt_head_link)
 	if [[ -n "$DATASET_EXO_PITCH" ]]; then
@@ -130,20 +198,61 @@ cleanup() {
 		CLOUD_RECORD_PID=""
 	fi
 	if [[ -n "${BAG_PID:-}" ]] && kill -0 "$BAG_PID" 2>/dev/null; then
-		kill "$BAG_PID" || true
+		kill -INT "$BAG_PID" || true
+		wait "$BAG_PID" 2>/dev/null || true
+		BAG_PID=""
 	fi
 	if [[ -n "${PIPELINE_PID:-}" ]] && kill -0 "$PIPELINE_PID" 2>/dev/null; then
-		kill "$PIPELINE_PID" || true
+		# ros2 launch can wait forever after its bag has ended. Escalate in a
+		# bounded way; the scoped node cleanup below handles orphaned children.
+		kill -INT "$PIPELINE_PID" || true
+		for _ in {1..10}; do
+			kill -0 "$PIPELINE_PID" 2>/dev/null || break
+			sleep 0.5
+		done
+		if kill -0 "$PIPELINE_PID" 2>/dev/null; then
+			kill -TERM "$PIPELINE_PID" || true
+			for _ in {1..10}; do
+				kill -0 "$PIPELINE_PID" 2>/dev/null || break
+				sleep 0.5
+			done
+		fi
+		if kill -0 "$PIPELINE_PID" 2>/dev/null; then
+			kill -KILL "$PIPELINE_PID" || true
+		fi
+		wait "$PIPELINE_PID" 2>/dev/null || true
+		PIPELINE_PID=""
 	fi
 	if [[ -n "${RVIZ_PID:-}" ]] && kill -0 "$RVIZ_PID" 2>/dev/null; then
-		kill "$RVIZ_PID" || true
+		kill -INT "$RVIZ_PID" || true
+		wait "$RVIZ_PID" 2>/dev/null || true
+		RVIZ_PID=""
 	fi
-	# Kill all nodes by executable name to ensure no zombies remain
-	pkill -f 'depth_preprocessor' || true
-	pkill -f 'semantic_masker' || true
-	pkill -f 'extrinsic_solver' || true
-	pkill -f 'cloud_map_evaluator' || true
-	pkill -f 'ros2 bag play' || true
+	# ros2 launch may orphan children after interruption. Scope cleanup to the
+	# exact node names owned by this pipeline, never unrelated ROS processes.
+	for node in exo_color_tf exo_imu_tf head_color_tf gt_exo_tf gt_head_tf \
+		viz_ground_to_map_tf exo_rgbd_odometry exo_rtabmap map_assembler \
+		benchmark_evaluator depth_preprocessor exo_depth_preprocessor \
+		head_depth_preprocessor semantic_masker extrinsic_solver \
+		exo_pcl_publisher exo_imu_filter sequence_pair_adapter; do
+		pkill -INT -f "__node:=${node}( |$)" 2>/dev/null || true
+	done
+	sleep 1
+	for node in exo_color_tf exo_imu_tf head_color_tf gt_exo_tf gt_head_tf \
+		viz_ground_to_map_tf exo_rgbd_odometry exo_rtabmap map_assembler \
+		benchmark_evaluator depth_preprocessor exo_depth_preprocessor \
+		head_depth_preprocessor semantic_masker extrinsic_solver \
+		exo_pcl_publisher exo_imu_filter sequence_pair_adapter; do
+		pkill -TERM -f "__node:=${node}( |$)" 2>/dev/null || true
+	done
+	# Last resort for a node stuck in shutdown (for example a GPU callback).
+	for node in exo_color_tf exo_imu_tf head_color_tf gt_exo_tf gt_head_tf \
+		viz_ground_to_map_tf exo_rgbd_odometry exo_rtabmap map_assembler \
+		benchmark_evaluator depth_preprocessor exo_depth_preprocessor \
+		head_depth_preprocessor semantic_masker extrinsic_solver \
+		exo_pcl_publisher exo_imu_filter sequence_pair_adapter; do
+		pkill -KILL -f "__node:=${node}( |$)" 2>/dev/null || true
+	done
 	if [[ -n "${CLOUD_EVAL_BAG:-}" && "$OFFLINE_COMMAND_PRINTED" == false ]]; then
 		echo "Offline cloud evaluation command:"
 		echo "source install/setup.bash && ros2 launch exo_head_slam cloud_map_evaluation_launch.py bag_path:=$CLOUD_EVAL_BAG metrics_csv_path:=$CLOUD_METRICS_CSV"
@@ -168,7 +277,12 @@ wait_for_pipeline() {
 trap cleanup EXIT INT TERM
 
 cleanup
-make build
+if [[ "$BUILD" == true ]]; then
+	make build
+elif [[ ! -f install/setup.bash ]]; then
+	echo "install/setup.bash missing; run make build first" >&2
+	exit 1
+fi
 set +u
 source install/setup.bash
 set -u
@@ -189,9 +303,10 @@ if [ -d "install/exo_head_slam/lib/exo_head_slam" ]; then
     sed -i "1s|^#!.*python.*|#!$(which python3)|" install/exo_head_slam/lib/exo_head_slam/*
 fi
 
-mkdir -p metrics/pipeline
-METRICS_CSV="metrics/pipeline/metrics_${RUN_ID}.csv"
+mkdir -p "$METRICS_DIR" "$EVAL_DIR"
+METRICS_CSV="${METRICS_DIR}/metrics_${RUN_ID}.csv"
 echo "Logging metrics to: $METRICS_CSV"
+rm -f -- "${BENCHMARK_OUTPUT_PREFIX}.json" "${BENCHMARK_OUTPUT_PREFIX}_trajectory.csv"
 
 # fastcdr 2.2.5 needs the local compatibility shim. Current Jazzy releases do not.
 FASTCDR_VERSION="$(dpkg-query -W -f='${Version}' "ros-${ROS_DISTRO:-jazzy}-fastcdr" 2>/dev/null || true)"
@@ -217,12 +332,12 @@ fi
 echo "RTAB-Map IMU leveling: $USE_IMU"
 
 RECORD_CLOUD_MAP=false
-if ros2 bag info "$BAG_PATH" 2>/dev/null | grep -q 'Topic: /ground_truth/visible_cloud | Type: sensor_msgs/msg/PointCloud2'; then
+if grep -q 'Topic: /ground_truth/visible_cloud | Type: sensor_msgs/msg/PointCloud2' <<<"$BAG_INFO"; then
 	RECORD_CLOUD_MAP=true
 	CLOUD_METRICS_CSV="${METRICS_CSV%.csv}_cloud.csv"
 	CLOUD_EVAL_BAG="${METRICS_CSV%.csv}_cloud_bag"
 	case "$CLOUD_EVAL_BAG" in
-		metrics/pipeline/metrics_*_cloud_bag) rm -rf -- "$CLOUD_EVAL_BAG" ;;
+		"${METRICS_DIR}"/metrics_*_cloud_bag) rm -rf -- "$CLOUD_EVAL_BAG" ;;
 		*) echo "Refusing to replace unexpected bag path: $CLOUD_EVAL_BAG" >&2; exit 1 ;;
 	esac
 	rm -f -- "$CLOUD_METRICS_CSV" "${CLOUD_METRICS_CSV%.csv}_global.csv" \
@@ -234,8 +349,10 @@ echo "Playback rate: ${PLAYBACK_RATE}x"
 echo "Loop playback: $LOOP_PLAYBACK"
 echo "Debug point clouds: $PUBLISH_DEBUG_PCL"
 echo "RTAB-Map input: /camera/exo/color/image_raw + /exo/filtered/depth_raw"
+echo "Coupled single-camera sequence: $COUPLED_SEQUENCE_DATASET"
+echo "TUM trajectory evaluation: $TUM_GROUND_TRUTH"
 
-ros2 launch exo_head_slam main_pipeline_launch.py use_sim_time:=true publish_debug_pcl:="$PUBLISH_DEBUG_PCL" metrics_csv_path:="$METRICS_CSV" exo_pitch_deg:="$EXO_PITCH_DEG" head_pitch_deg:="$HEAD_PITCH_DEG" use_imu:="$USE_IMU" imu_topic:=/camera/exo/imu exoskeleton_dataset:="$EXOSKELETON_DATASET" "${GT_LAUNCH_ARGS[@]}" &
+ros2 launch exo_head_slam main_pipeline_launch.py use_sim_time:=true publish_debug_pcl:="$PUBLISH_DEBUG_PCL" metrics_csv_path:="$METRICS_CSV" benchmark_output_prefix:="$BENCHMARK_OUTPUT_PREFIX" sliding_window_size:="$SLIDING_WINDOW_SIZE" exo_pitch_deg:="$EXO_PITCH_DEG" head_pitch_deg:="$HEAD_PITCH_DEG" use_imu:="$USE_IMU" imu_topic:=/camera/exo/imu exoskeleton_dataset:="$EXOSKELETON_DATASET" coupled_sequence_dataset:="$COUPLED_SEQUENCE_DATASET" tum_ground_truth:="$TUM_GROUND_TRUTH" "${GT_LAUNCH_ARGS[@]}" &
 PIPELINE_PID=$!
 
 if ! wait_for_pipeline; then
@@ -244,11 +361,23 @@ if ! wait_for_pipeline; then
 fi
 
 if [[ "$RECORD_CLOUD_MAP" == true ]]; then
+	GROUND_TRUTH_ODOM_TOPIC=/exoskeleton/odom
+	GROUND_TRUTH_CLOUD_IS_LOCAL=false
+	GROUND_TRUTH_IS_CAMERA_POSE=false
+	if [[ "$TUM_GROUND_TRUTH" == true ]]; then
+		GROUND_TRUTH_ODOM_TOPIC=/ground_truth/odom
+		GROUND_TRUTH_CLOUD_IS_LOCAL=true
+		GROUND_TRUTH_IS_CAMERA_POSE=true
+	fi
 	ros2 bag record -s mcap -o "$CLOUD_EVAL_BAG" --disable-keyboard-controls \
 		--custom-data "exo_pitch_deg=$EXO_PITCH_DEG" \
 			"dataset_numbers=$DATASET_NUMBERS" \
-			"sliding_window_size=$SLIDING_WINDOW_SIZE" --topics \
-		/vggt/combined_pointcloud /ground_truth/visible_cloud /exoskeleton/odom &
+			"sliding_window_size=$SLIDING_WINDOW_SIZE" \
+			"ground_truth_odom_topic=$GROUND_TRUTH_ODOM_TOPIC" \
+			"ground_truth_cloud_is_local=$GROUND_TRUTH_CLOUD_IS_LOCAL" \
+			"ground_truth_is_camera_pose=$GROUND_TRUTH_IS_CAMERA_POSE" --topics \
+		/vggt/combined_pointcloud /ground_truth/visible_cloud \
+		"$GROUND_TRUTH_ODOM_TOPIC" &
 	CLOUD_RECORD_PID=$!
 	sleep 1
 fi
@@ -259,16 +388,26 @@ if [[ "$EXOSKELETON_DATASET" == true ]]; then
 	# Avoid duplicate parents; the launch file republishes only the camera transforms it needs.
 	PLAY_REMAP=(--remap /tf_static:=/recorded/tf_static)
 fi
-PLAY_ARGS=(-i "$BAG_PATH" mcap --rate "$PLAYBACK_RATE" --disable-keyboard-controls --clock)
+PLAY_ARGS=("$BAG_PATH" --rate "$PLAYBACK_RATE" --disable-keyboard-controls --clock)
 if [[ "$LOOP_PLAYBACK" == true ]]; then
 	PLAY_ARGS+=(--loop)
+fi
+if [[ "$COUPLED_SEQUENCE_DATASET" == true ]]; then
+	PLAY_ARGS+=(--topics /camera/rgb/image_color /camera/depth/image /camera/rgb/camera_info)
+	if [[ "$TUM_GROUND_TRUTH" == true ]]; then
+		PLAY_ARGS+=(/ground_truth/odom /ground_truth/visible_cloud \
+			/ground_truth/pair_tf)
+	fi
 fi
 ros2 bag play "${PLAY_ARGS[@]}" "${PLAY_REMAP[@]}" &
 BAG_PID=$!
 
 # Launch RViz with pre-configured displays
-rviz2 -d "$(ros2 pkg prefix exo_head_slam)/share/exo_head_slam/rviz/pipeline.rviz" --ros-args -p use_sim_time:=true &
-RVIZ_PID=$!
+RVIZ_PID=""
+if [[ "$HEADLESS" == false ]]; then
+	rviz2 -d "$(ros2 pkg prefix exo_head_slam)/share/exo_head_slam/rviz/pipeline.rviz" --ros-args -p use_sim_time:=true &
+	RVIZ_PID=$!
+fi
 
 if [[ "$LOOP_PLAYBACK" == true ]]; then
 	wait "$PIPELINE_PID"
@@ -278,5 +417,32 @@ else
 	BAG_PID=""
 	echo "Bag playback finished; draining pipeline for 5 seconds..."
 	sleep 5
+	if [[ "$EXOSKELETON_DATASET" == true || "$TUM_GROUND_TRUTH" == true ]]; then
+		if ! timeout 30 ros2 service call /benchmark_evaluator/finalize \
+			std_srvs/srv/Trigger '{}' >/dev/null; then
+			echo "Benchmark evaluator service did not finish" >&2
+			exit 1
+		fi
+		if [[ ! -f "${BENCHMARK_OUTPUT_PREFIX}.json" ]]; then
+			echo "Benchmark evaluator did not produce ${BENCHMARK_OUTPUT_PREFIX}.json" >&2
+			exit 1
+		fi
+		echo "Benchmark written: ${BENCHMARK_OUTPUT_PREFIX}.json"
+	fi
+	if [[ "$RECORD_CLOUD_MAP" == true ]]; then
+		OFFLINE_COMMAND_PRINTED=true
+		cleanup
+		echo "Running offline cloud evaluation..."
+		ros2 launch exo_head_slam cloud_map_evaluation_launch.py \
+			bag_path:="$CLOUD_EVAL_BAG" metrics_csv_path:="$CLOUD_METRICS_CSV" \
+			playback_rate:=3.0 global:=true
+		EVAL_DIR="$EVAL_DIR" python3 plot_metrics.py "$METRICS_CSV"
+		EVAL_DIR="$EVAL_DIR" python3 plot_metrics.py "${CLOUD_METRICS_CSV%.csv}_global.csv"
+		if [[ ! -f "${CLOUD_METRICS_CSV%.csv}_global.csv" ]]; then
+			echo "Cloud evaluator did not produce ${CLOUD_METRICS_CSV%.csv}_global.csv" >&2
+			exit 1
+		fi
+		echo "Cloud evaluation written: ${CLOUD_METRICS_CSV%.csv}_global.csv"
+	fi
 	exit "$BAG_STATUS"
 fi
