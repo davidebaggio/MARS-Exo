@@ -29,8 +29,9 @@ setup(
             'semantic_masker = exo_head_slam.semantic_masker_node:main',
             'extrinsic_solver = exo_head_slam.extrinsic_solver_node:main',
             'pointcloud_publisher = exo_head_slam.pointcloud_publisher_node:main',
-            'fallback_vo = exo_head_slam.fallback_vo_node:main',
-            'nvblox_node = exo_head_slam.nvblox_node:main',
+            'cloud_map_evaluator = exo_head_slam.cloud_map_evaluator_node:main',
+            'benchmark_evaluator = exo_head_slam.benchmark_evaluator_node:main',
+            'sequence_pair_adapter = exo_head_slam.sequence_pair_adapter_node:main',
         ],
     },
 )

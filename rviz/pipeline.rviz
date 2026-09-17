@@ -9,6 +9,10 @@ Panels:
         - /ExoDepthImage1
         - /HeadDebugCloud1
         - /ExoDebugCloud1
+        - /VggtCloud1
+        - /VggtFusedLocalCloud1
+        - /GroundTruthGlobalMap1
+        - /GroundTruthOdometry1
       Splitter Ratio: 0.5
     Tree Height: 500
   - Class: rviz_common/Views
@@ -80,7 +84,7 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /head/debug_pcl
-      Value: true
+      Value: false
     - Class: rviz_default_plugins/PointCloud2
       Color Transformer: RGB8
       Enabled: false
@@ -92,69 +96,113 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /exo/debug_pcl
-      Value: true
+      Value: false
     - Class: rviz_default_plugins/PointCloud2
       Color Transformer: RGB8
-      Enabled: false
-      Name: RtabmapCloud
-      Size (Pixels): 2
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /exo_rtabmap/cloud_map
-      Value: true
-    - Class: rviz_default_plugins/Odometry
       Enabled: true
-      Name: ExoOdom
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /exo/odom
-      Value: true
-    - Alpha: 0.7
-      Class: rviz_default_plugins/Map
-      Color Scheme: map
-      Draw Backend: ogre
-      Enabled: false
-      Name: NvbloxCostmap
-      Topic:
-        Depth: 5
-        Durability Policy: Transient Local
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /nvblox/costmap
-      Update Interval: 1
-      Use Timestamp: false
-      Value: true
-    - Class: rviz_default_plugins/PointCloud2
-      Color Transformer: RGB8
-      Enabled: false
-      Name: NvbloxCloud
+      Name: VggtCloud
       Size (Pixels): 3
       Topic:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /nvblox/pointcloud
+        Value: /lightglue/combined_pointcloud
       Value: true
-    - Class: rviz_default_plugins/Marker
-      Enabled: false
-      Name: NvbloxMesh
+    - Class: rviz_default_plugins/PointCloud2
+      Color Transformer: RGB8
+      Enabled: true
+      Name: VggtFusedLocalCloud
+      Size (Pixels): 3
       Topic:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /nvblox/mesh
+        Value: /vggt/fused_local_pointcloud
+      Value: true
+    - Class: rviz_default_plugins/PointCloud2
+      Color Transformer: RGB8
+      Enabled: true
+      Name: RtabmapCloud
+      Size (Pixels): 3
+      Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /exo_rtabmap/cloud_map
+      Value: true
+    - Alpha: 0.35
+      Class: rviz_default_plugins/PointCloud2
+      Color: 85; 255; 127
+      Color Transformer: FlatColor
+      Enabled: true
+      Name: GroundTruthGlobalMap
+      Size (Pixels): 2
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /ground_truth/global_map
+      Value: true
+    - Alpha: 0.6
+      Class: rviz_default_plugins/PointCloud2
+      Color: 255; 170; 0
+      Color Transformer: FlatColor
+      Enabled: false
+      Name: GroundTruthVisibleCloud
+      Size (Pixels): 2
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /ground_truth/visible_cloud
+      Value: false
+    - Alpha: 0.35
+      Class: rviz_default_plugins/PointCloud2
+      Color: 85; 170; 255
+      Color Transformer: FlatColor
+      Enabled: false
+      Name: GroundTruthVisibleMap
+      Size (Pixels): 2
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /ground_truth/visible_map
+      Value: false
+    - Class: rviz_default_plugins/Odometry
+      Enabled: true
+      Name: GroundTruthOdometry
+      Topic:
+        Depth: 10
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /exoskeleton/odom
+      Value: true
+    - Alpha: 0.7
+      Class: rviz_default_plugins/Map
+      Color Scheme: map
+      Draw Backend: ogre
+      Enabled: false
+      Name: RtabmapGrid
+      Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /map
+      Update Interval: 1
+      Use Timestamp: false
       Value: true
   Global Options:
     Background Color: 48; 48; 48
-    Fixed Frame: odom
+    Fixed Frame: viz_ground
     Frame Rate: 30
   Name: root
   Tools:

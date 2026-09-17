@@ -3,6 +3,7 @@ from launch.actions import IncludeLaunchDescription
 from launch.actions import LogInfo
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
 from launch.substitutions import PathJoinSubstitution, LaunchConfiguration, PythonExpression
 from launch_ros.substitutions import FindPackageShare
@@ -29,42 +30,90 @@ def generate_launch_description():
     )
     publish_debug_pcl = LaunchConfiguration('publish_debug_pcl')
 
-    global_frame_arg = DeclareLaunchArgument(
-        'global_frame',
-        default_value='odom',
-        description='Global frame for point clouds and rviz (e.g., map or odom)'
+    metrics_csv_path_arg = DeclareLaunchArgument(
+        'metrics_csv_path',
+        default_value='extrinsic_metrics.csv',
+        description='Path to the metrics CSV file'
     )
-    global_frame = LaunchConfiguration('global_frame')
+    metrics_csv_path = LaunchConfiguration('metrics_csv_path')
 
-    slam_backend_arg = DeclareLaunchArgument(
-        'slam_backend',
-        default_value='orbslam3',
-        description='SLAM backend: orbslam3, rtabmap, or none'
-    )
-    slam_backend = LaunchConfiguration('slam_backend')
+    gt_parent_frame_arg = DeclareLaunchArgument('gt_parent_frame', default_value='')
+    gt_parent_frame = LaunchConfiguration('gt_parent_frame')
+    gt_child_frame_arg = DeclareLaunchArgument('gt_child_frame', default_value='')
+    gt_child_frame = LaunchConfiguration('gt_child_frame')
+    gt_tf_topic_arg = DeclareLaunchArgument('gt_tf_topic', default_value='')
+    gt_tf_topic = LaunchConfiguration('gt_tf_topic')
 
-    orbslam_mode_arg = DeclareLaunchArgument(
-        'orbslam_mode',
-        default_value='rgbd_imu',
-        description='ORB-SLAM3 mode: rgbd_imu or rgbd'
-    )
-    orbslam_mode = LaunchConfiguration('orbslam_mode')
+    exo_pitch_deg_arg = DeclareLaunchArgument('exo_pitch_deg', default_value='0')
+    exo_pitch_deg = LaunchConfiguration('exo_pitch_deg')
+    head_pitch_deg_arg = DeclareLaunchArgument('head_pitch_deg', default_value='0')
+    head_pitch_deg = LaunchConfiguration('head_pitch_deg')
 
-    enable_nvblox_arg = DeclareLaunchArgument(
-        'enable_nvblox',
+    use_imu_arg = DeclareLaunchArgument(
+        'use_imu',
         default_value='false',
-        description='Enable nvblox TSDF fusion'
+        description='Use exo IMU for RTAB-Map odometry gravity initialization'
     )
-    enable_nvblox = LaunchConfiguration('enable_nvblox')
+    use_imu = LaunchConfiguration('use_imu')
 
-    enable_extrinsic_arg = DeclareLaunchArgument(
-        'enable_extrinsic',
-        default_value='true',
-        description='Enable dynamic exo_link -> head_link extrinsic solver'
+    imu_topic_arg = DeclareLaunchArgument(
+        'imu_topic',
+        default_value='/camera/exo/imu',
+        description='Raw exo IMU topic'
     )
-    enable_extrinsic = LaunchConfiguration('enable_extrinsic')
+    imu_topic = LaunchConfiguration('imu_topic')
+
+    filtered_imu_topic_arg = DeclareLaunchArgument(
+        'filtered_imu_topic',
+        default_value='/exo/imu/data',
+        description='Madgwick-filtered exo IMU topic for RTAB-Map'
+    )
+    filtered_imu_topic = LaunchConfiguration('filtered_imu_topic')
+
+    map_start_z_arg = DeclareLaunchArgument(
+        'map_start_z',
+        default_value='1',
+        description='Initial map height in the RViz ground frame, meters'
+    )
+    map_start_z = LaunchConfiguration('map_start_z')
+
+    exoskeleton_dataset_arg = DeclareLaunchArgument(
+        'exoskeleton_dataset',
+        default_value='false',
+        description='Use frame adapters for the exoskeleton_dataset bag'
+    )
+    exoskeleton_dataset = LaunchConfiguration('exoskeleton_dataset')
+
+    coupled_sequence_dataset_arg = DeclareLaunchArgument(
+        'coupled_sequence_dataset',
+        default_value='false',
+        description='Pair adjacent frames from a single-camera RGB-D sequence'
+    )
+    coupled_sequence_dataset = LaunchConfiguration('coupled_sequence_dataset')
+
+    tum_ground_truth_arg = DeclareLaunchArgument(
+        'tum_ground_truth',
+        default_value='false',
+        description='Evaluate against /ground_truth/odom from a TUM bag'
+    )
+    tum_ground_truth = LaunchConfiguration('tum_ground_truth')
+
+    benchmark_output_prefix_arg = DeclareLaunchArgument(
+        'benchmark_output_prefix',
+        default_value='metrics/eval/benchmark',
+        description='Output prefix for trajectory and map benchmark files',
+    )
+    benchmark_output_prefix = LaunchConfiguration('benchmark_output_prefix')
 
     common_params = {'use_sim_time': use_sim_time}
+
+    sequence_pair_adapter = Node(
+        package='exo_head_slam',
+        executable='sequence_pair_adapter',
+        name='sequence_pair_adapter',
+        parameters=[common_config, common_params],
+        condition=IfCondition(coupled_sequence_dataset),
+    )
 
     head_depth_preprocessor = Node(
         package='exo_head_slam',
@@ -80,20 +129,11 @@ def generate_launch_description():
         parameters=[exo_config, common_params],
     )
     
-    # Head Masker
-    head_masker = Node(
+    semantic_masker = Node(
         package='exo_head_slam',
         executable='semantic_masker',
-        name='head_semantic_masker',
-        parameters=[head_config, common_params],
-    )
-    
-    # Exo Masker
-    exo_masker = Node(
-        package='exo_head_slam',
-        executable='semantic_masker',
-        name='exo_semantic_masker',
-        parameters=[exo_config, common_params],
+        name='semantic_masker',
+        parameters=[common_config, common_params],
     )
     
     # Extrinsic Solver
@@ -101,8 +141,46 @@ def generate_launch_description():
         package='exo_head_slam',
         executable='extrinsic_solver',
         name='extrinsic_solver',
-        parameters=[common_config, exo_config, common_params],
-        condition=IfCondition(enable_extrinsic),
+        parameters=[common_config, exo_config, common_params, {
+            'metrics_csv_path': metrics_csv_path,
+            'gt_parent_frame': gt_parent_frame,
+            'gt_child_frame': gt_child_frame,
+            'gt_tf_topic': gt_tf_topic,
+            'validate_rig_geometry': ParameterValue(
+                PythonExpression([
+                    "'", coupled_sequence_dataset, "'.lower() != 'true'"
+                ]),
+                value_type=bool,
+            ),
+            'min_solver_interval': ParameterValue(
+                PythonExpression([
+                    "0.0 if '", coupled_sequence_dataset,
+                    "'.lower() == 'true' else 0.2"
+                ]),
+                value_type=float,
+            ),
+            'tf_filter_alpha': ParameterValue(
+                PythonExpression([
+                    "1.0 if '", coupled_sequence_dataset,
+                    "'.lower() == 'true' else 0.5"
+                ]),
+                value_type=float,
+            ),
+            'max_trans_jump': ParameterValue(
+                PythonExpression([
+                    "0.0 if '", coupled_sequence_dataset,
+                    "'.lower() == 'true' else 0.3"
+                ]),
+                value_type=float,
+            ),
+            'max_rot_jump': ParameterValue(
+                PythonExpression([
+                    "0.0 if '", coupled_sequence_dataset,
+                    "'.lower() == 'true' else 0.5"
+                ]),
+                value_type=float,
+            ),
+        }],
     )
 
     # Debug PointCloud Publishers
@@ -115,7 +193,6 @@ def generate_launch_description():
             'input_depth_topic': '/head/masked/depth_raw',
             'input_camera_info_topic': '/camera/head/color/camera_info',
             'output_pcl_topic': '/head/debug_pcl',
-            'global_frame': global_frame,
             'downsample_factor': 2,
             'use_sim_time': use_sim_time
         }],
@@ -131,94 +208,135 @@ def generate_launch_description():
             'input_depth_topic': '/exo/masked/depth_raw',
             'input_camera_info_topic': '/camera/exo/color/camera_info',
             'output_pcl_topic': '/exo/debug_pcl',
-            'global_frame': global_frame,
             'downsample_factor': 2,
             'use_sim_time': use_sim_time
         }],
         condition=IfCondition(publish_debug_pcl)
     )
 
-    # Static TFs to keep RViz connected before tracking publishes dynamic poses.
-    static_tf_odom = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='static_tf_world_odom',
-        arguments=['0', '0', '0', '0', '0', '0', 'world', 'odom']
-    )
-
-    # Static TFs to fix disjoint camera frames
-    static_tf_exo = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='static_tf_exo_link',
-        arguments=['0', '0', '0', '0', '0', '0', 'exo_link', 'exo_camera_link']
-    )
-
-    static_tf_head = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='static_tf_head_link',
-        arguments=['0', '0', '0', '0', '0', '0', 'head_link', 'head_camera_link']
-    )
-
+    # Start RTAB-Map early so it initializes before data flows (service ready
+    # by the time map_assembler fires after its 5s TimerAction delay).
     actions = [
         use_sim_time_arg,
         publish_debug_pcl_arg,
-        global_frame_arg,
-        slam_backend_arg,
-        orbslam_mode_arg,
-        enable_nvblox_arg,
-        enable_extrinsic_arg,
-        static_tf_odom,
-        static_tf_exo,
-        static_tf_head,
-        head_depth_preprocessor,
-        exo_depth_preprocessor,
-        head_masker,
-        exo_masker,
-        extrinsic_solver,
-        head_pcl_pub,
-        exo_pcl_pub,
+        metrics_csv_path_arg,
+        gt_parent_frame_arg,
+        gt_child_frame_arg,
+        gt_tf_topic_arg,
+        exo_pitch_deg_arg,
+        head_pitch_deg_arg,
+        use_imu_arg,
+        imu_topic_arg,
+        filtered_imu_topic_arg,
+        map_start_z_arg,
+        exoskeleton_dataset_arg,
+        coupled_sequence_dataset_arg,
+        tum_ground_truth_arg,
+        benchmark_output_prefix_arg,
     ]
 
+    # The dataset uses camera-link names while the pipeline owns exo_link/head_link.
+    for name, parent, child, translation, quaternion in (
+        ('exo_color_tf', 'exo_link', 'front_camera_color_optical_frame', ('0', '0', '0'), ('0.5', '-0.5', '0.5', '-0.5')),
+        ('exo_imu_tf', 'exo_link', 'front_camera_imu_frame', ('0', '0', '0'), ('0', '0', '0', '1')),
+        ('head_color_tf', 'head_link', 'head_camera_color_optical_frame', ('0', '0', '0'), ('0.5', '-0.5', '0.5', '-0.5')),
+    ):
+        actions.append(Node(
+            package='tf2_ros',
+            executable='static_transform_publisher',
+            name=name,
+            arguments=[
+                '--x', translation[0], '--y', translation[1], '--z', translation[2],
+                '--qx', quaternion[0], '--qy', quaternion[1],
+                '--qz', quaternion[2], '--qw', quaternion[3],
+                '--frame-id', parent, '--child-frame-id', child,
+            ],
+            condition=IfCondition(
+                exoskeleton_dataset if name == 'exo_imu_tf' else PythonExpression([
+                    "'", exoskeleton_dataset, "'.lower() == 'true' or '",
+                    coupled_sequence_dataset, "'.lower() == 'true'",
+                ])
+            ),
+        ))
+
+    for name, child, translation, pitch_deg in (
+        ('gt_exo_tf', 'gt_exo_link', ('0.07', '0', '0'), exo_pitch_deg),
+        ('gt_head_tf', 'gt_head_link', ('0.07', '0', '0.75'), head_pitch_deg),
+    ):
+        actions.append(Node(
+            package='tf2_ros',
+            executable='static_transform_publisher',
+            name=name,
+            arguments=[
+                '--x', translation[0], '--y', translation[1], '--z', translation[2],
+                '--roll', '0',
+                '--pitch', PythonExpression([pitch_deg, ' * 0.017453292519943295']),
+                '--yaw', '0',
+                '--frame-id', 'gt_waist_link', '--child-frame-id', child,
+            ],
+            condition=IfCondition(exoskeleton_dataset),
+        ))
+
     try:
-        get_package_share_directory('rtabmap_slam')
+        for required_package in ('rtabmap_slam', 'rtabmap_odom', 'rtabmap_util'):
+            get_package_share_directory(required_package)
         actions.append(
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
                     PathJoinSubstitution([pkg_share, 'launch', 'rtabmap_agents_launch.py'])
                 ),
-                launch_arguments={'use_sim_time': use_sim_time}.items(),
-                condition=IfCondition(PythonExpression(["'", slam_backend, "' == 'rtabmap'"])),
+                launch_arguments={
+                    'use_sim_time': use_sim_time,
+                    'use_imu': use_imu,
+                    'imu_topic': imu_topic,
+                    'filtered_imu_topic': filtered_imu_topic,
+                    'map_start_z': map_start_z,
+                    'coupled_sequence_dataset': coupled_sequence_dataset,
+                }.items(),
             )
         )
+        actions.append(Node(
+            package='exo_head_slam',
+            executable='benchmark_evaluator',
+            name='benchmark_evaluator',
+            parameters=[{
+                'use_sim_time': use_sim_time,
+                'output_prefix': benchmark_output_prefix,
+                'map_start_z': ParameterValue(map_start_z, value_type=float),
+                'waist_to_exo_pitch_deg': ParameterValue(
+                    exo_pitch_deg, value_type=float
+                ),
+                'ground_truth_odom_topic': PythonExpression([
+                    "'/ground_truth/odom' if '", tum_ground_truth,
+                    "'.lower() == 'true' else '/exoskeleton/odom'",
+                ]),
+                'ground_truth_is_camera_pose': ParameterValue(
+                    tum_ground_truth, value_type=bool
+                ),
+                'require_ground_truth_map': ParameterValue(
+                    PythonExpression([
+                        "'", tum_ground_truth, "'.lower() != 'true'"
+                    ]),
+                    value_type=bool,
+                ),
+            }],
+            condition=IfCondition(PythonExpression([
+                "'", exoskeleton_dataset, "'.lower() == 'true' or '",
+                tum_ground_truth, "'.lower() == 'true'",
+            ])),
+            output='screen',
+        ))
     except PackageNotFoundError:
-        actions.append(LogInfo(msg='rtabmap_slam not found, skipping RTAB-Map launch.'))
+        actions.append(LogInfo(msg='Required RTAB-Map packages not found, skipping RTAB-Map launch.'))
 
-    actions.append(
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(
-                PathJoinSubstitution([pkg_share, 'launch', 'orbslam3_exo_launch.py'])
-            ),
-            launch_arguments={
-                'use_sim_time': use_sim_time,
-                'orbslam_mode': orbslam_mode,
-            }.items(),
-            condition=IfCondition(PythonExpression(["'", slam_backend, "' == 'orbslam3'"])),
-        )
-    )
-
-    actions.append(
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(
-                PathJoinSubstitution([pkg_share, 'launch', 'nvblox_fusion_launch.py'])
-            ),
-            launch_arguments={
-                'use_sim_time': use_sim_time,
-                'global_frame': global_frame
-            }.items(),
-            condition=IfCondition(enable_nvblox),
-        )
-    )
+    actions.extend([
+        sequence_pair_adapter,
+        head_depth_preprocessor,
+        exo_depth_preprocessor,
+        semantic_masker,
+        extrinsic_solver,
+        head_pcl_pub,
+        exo_pcl_pub,
+    ])
 
     return LaunchDescription(actions)

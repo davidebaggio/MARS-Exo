@@ -47,7 +47,8 @@ python -m pip install \
     "open3d" \
     "pyquaternion" \
     "transforms3d" \
-    "nvitop"
+    "nvitop" \
+    "rosbags"
 
 python -m pip install \
     "torch==2.3.1" \

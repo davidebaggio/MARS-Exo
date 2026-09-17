@@ -1,3 +1,25 @@
+sequence_pair_adapter:
+  ros__parameters:
+    max_pair_interval: 0.5
+
+semantic_masker:
+  ros__parameters:
+    head.input_rgb_topic: "/camera/head/color/image_raw"
+    head.input_depth_topic: "/head/filtered/depth_raw"
+    head.output_rgb_topic: "/head/masked/image_raw"
+    head.output_depth_topic: "/head/masked/depth_raw"
+    head.conf_threshold: 0.25
+    head.dynamic_classes: [0, 1, 2, 3, 5, 7]
+    exo.input_rgb_topic: "/camera/exo/color/image_raw"
+    exo.input_depth_topic: "/exo/filtered/depth_raw"
+    exo.output_rgb_topic: "/exo/masked/image_raw"
+    exo.output_depth_topic: "/exo/masked/depth_raw"
+    exo.conf_threshold: 0.20
+    exo.dynamic_classes: [0, 1, 2, 3, 5, 7]
+    masker.model_path: "yolov8n-seg.pt"
+    mask_dilation_px: 5
+    sync_slop: 0.035
+
 extrinsic_solver:
   ros__parameters:
     matcher_type: "lightglue"
@@ -12,9 +34,36 @@ extrinsic_solver:
     head_frame_id: "head_link"
     exo_frame_id: "exo_link"
     min_3d_matches: 15
+    min_solver_interval: 0.2
+    ransac_threshold: 0.05
+    ransac_iterations: 100
+    ransac_seed: 0
+    max_ransac_rmse: 0.05
+    min_inlier_ratio: 0.3
     tf_filter_alpha: 0.5
+    max_trans_jump: 0.3
+    max_rot_jump: 0.5
+    validate_rig_geometry: true
     connect_uninitialized_tf: true
+    combined_cloud_topic: "/lightglue/combined_pointcloud"
+    combined_cloud_stride: 2
     metrics_enabled: true
     metrics_csv_path: "extrinsic_metrics.csv"
     gt_parent_frame: ""
     gt_child_frame: ""
+    gt_tf_topic: ""
+
+cloud_map_evaluator:
+  ros__parameters:
+    estimated_cloud_topic: "/lightglue/combined_pointcloud"
+    ground_truth_cloud_topic: "/ground_truth/visible_cloud"
+    ground_truth_odom_topic: "/exoskeleton/odom"
+    voxel_size: 0.05
+    fscore_threshold: 0.1
+    waist_to_exo_translation: [0.07, 0.0, 0.0]
+    waist_to_exo_pitch_deg: 0.0
+
+map_assembler:
+  ros__parameters:
+    Grid/DepthDecimation: "1"
+    Grid/CellSize: "0.01"

@@ -2,66 +2,65 @@
 
 ## Project
 
-ROS 2 ament_python package — multi-agent RGB-D SLAM pipeline for head + exoskeleton cameras. Master thesis project. No tests, no CI.
+ROS 2 `ament_python` package comparing LightGlue + RANSAC extrinsic
+calibration against VGGT-Omega on identical RGB-D datasets and metrics.
 
-## Build & Run
+## Build and test
 
 ```bash
 make build
 source install/setup.bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -q
 ```
 
-**Or use `run.sh`** — builds, sources, launches the pipeline, and plays a rosbag at 0.1x loop. Accepts an optional bag path argument.
+`make build` fixes generated Python shebangs and builds the Fast-CDR shim.
 
-### Critical: Python shebang fix
+## Runtime
 
-After `colcon build`, the generated shim scripts in `install/exo_head_slam/lib/exo_head_slam/` hardcode `#!/usr/bin/python3`. If using a conda or venv, rewrite the shebangs to `$(which python3)` or nodes will run in the system Python and miss dependencies. Both `make build` and `run.sh` do this automatically.
+```bash
+./run.sh [--rate RATE] [--imu] [--debug-pcl] [--loop] \
+  [--headless] [--no-build] [bag_path]
+./run_all_verified_evaluations.sh
+```
 
-## Nodes (entry points in setup.py)
+Supported inputs: native dual-camera bags, exoskeleton ground-truth bags, and
+converted TUM RGB-D bags under `data/`. Playback is one-shot by default.
 
-| Executable | Source | Purpose |
-|---|---|---|
-| `depth_preprocessor` | `depth_preprocessor_node.py` | Spatial + temporal depth filtering |
-| `semantic_masker` | `semantic_masker_node.py` | YOLOv8-seg dynamic object removal |
-| `extrinsic_solver` | `extrinsic_solver_node.py` | 3D-to-3D SE(3) calibration (ORB or LightGlue) |
-| `nvblox_node` | `nvblox_node.py` | TSDF fusion using nvblox_torch (mesh + pointcloud + costmap) |
+## Nodes
 
-## Launch
-
-- **`launch/main_pipeline_launch.py`** — top-level entry point. Starts all 3 custom nodes + static TF publishers.
-- RTAB-Map (single head instance, VO mode) is **optional** — the launch file checks if `rtabmap_slam` package exists and skips it silently if not found.
+| Executable | Purpose |
+|---|---|
+| `depth_preprocessor` | Metric depth normalization/filtering |
+| `semantic_masker` | Batched YOLO dynamic-object masking |
+| `sequence_pair_adapter` | Adjacent-frame TUM pairing |
+| `extrinsic_solver` | LightGlue matching, RANSAC, TF, combined cloud |
+| `pointcloud_publisher` | Optional debug clouds |
+| `benchmark_evaluator` | RTAB trajectory/map metrics |
+| `cloud_map_evaluator` | Offline visible-cloud metrics |
 
 ## Configuration
 
-All runtime parameters live in YAML, not in code:
-- `config/head.yaml` — head camera pipeline
-- `config/exo.yaml` — exo camera pipeline
-- `config/common.yaml` — extrinsic solver params (matcher_type, etc.)
+- `config/head.yaml`: head depth preprocessing
+- `config/exo.yaml`: exo preprocessing and RTAB-Map
+- `config/common.yaml`: masking, LightGlue/RANSAC, cloud evaluation
 
-Changing topics, filter params, or matcher type requires only YAML edits.
+RTAB-Map configuration must remain identical to `vggt-omega` for fair
+comparison. It consumes raw exo RGB plus filtered exo depth.
 
-## Optional Dependencies
+## Data flow
 
-- `ultralytics>=8.0` (requirements.txt) — semantic masker falls back to empty mask if missing
-- `lightglue` + `superpoint` — extrinsic solver falls back to ORB if missing
-- `rtabmap_slam` ROS 2 package — head camera VO/SLAM, optional
-- `nvblox_torch` (pip) — used by custom nvblox_node for TSDF fusion
-
-## Pipeline Data Flow
-
-```
-Head RGB + depth → depth_preprocessor → semantic_masker → rtabmap (head VO, optional)
-                                                     ↘
-Exo RGB + depth  → depth_preprocessor → semantic_masker → nvblox_node (TSDF fusion)
-
-semantic_masker (head+exo) → extrinsic_solver → TF head→exo
-rtabmap → TF map→head
-nvblox_node uses TF tree (map→head, map→head→exo) for fused TSDF
+```text
+head/exo RGB-D -> preprocessing -> semantic masking -> LightGlue/RANSAC
+                                                   -> exo_link->head_link TF
+                                                   -> /lightglue/combined_pointcloud
+exo raw RGB + filtered depth -> RTAB odometry/map
+GT bags -> extrinsic, cloud, trajectory, and map evaluators
 ```
 
 ## Gotchas
 
-- `build/`, `install/`, `log/` are colcon artifacts, gitignored
-- `*.pt` and `*.engine` model files are gitignored — `yolov8n-seg.pt` must be placed in repo root manually
-- Bag playback defaults to `$HOME/master_thesis/SLAM3R/data/exo/rosbag2_2026_05_06-16_48_23/rosbag2_2026_05_06-16_48_23_0.mcap`
-- RGB and depth must already be published and aligned by an upstream camera stack; this package does not capture or align them
+- LightGlue is required when configured; missing LightGlue/CUDA is fatal.
+- Missing `yolov8n-seg.pt` disables masking but does not stop the pipeline.
+- TUM pairs disable fixed-rig bounds, smoothing, jump rejection, and throttling.
+- Original ROS 1 TUM bags require `data/TUM/add_pointclouds_to_bagfile.py`.
+- Generated `build/`, `install/`, `log/`, model, bag, and metric files stay ignored.

@@ -37,7 +37,10 @@ env/
 # Source-built third-party SLAM deps
 third_party/
 
-data
+data/*
+!data/TUM/
+data/TUM/*
+!data/TUM/add_pointclouds_to_bagfile.py
 
 *.png
 

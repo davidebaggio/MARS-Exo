@@ -1,9 +1,12 @@
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 import numpy as np
 import cv2
+
+from .utils.vision_utils import sanitize_depth
 
 
 class DepthPreprocessorNode(Node):
@@ -15,10 +18,13 @@ class DepthPreprocessorNode(Node):
         self.declare_parameter('output_depth_topic', 'UNDEFINED')
         self.declare_parameter('depth_filter.enabled', True)
         self.declare_parameter('depth_filter.depth_unit_scale', 0.001)
+        self.declare_parameter('depth_filter.min_depth', 0.1)
+        self.declare_parameter('depth_filter.max_depth', 6.0)
+        self.declare_parameter('depth_filter.spatial.enabled', False)
         self.declare_parameter('depth_filter.spatial.kernel_size', 5)
         self.declare_parameter('depth_filter.spatial.sigma_color', 0.08)
         self.declare_parameter('depth_filter.spatial.sigma_space', 3.0)
-        self.declare_parameter('depth_filter.temporal.enabled', True)
+        self.declare_parameter('depth_filter.temporal.enabled', False)
         self.declare_parameter('depth_filter.temporal.alpha', 0.6)
 
         # Get values
@@ -31,6 +37,9 @@ class DepthPreprocessorNode(Node):
 
         self.enabled = self.get_parameter('depth_filter.enabled').value
         self.depth_unit_scale = float(self.get_parameter('depth_filter.depth_unit_scale').value)
+        self.min_depth = float(self.get_parameter('depth_filter.min_depth').value)
+        self.max_depth = float(self.get_parameter('depth_filter.max_depth').value)
+        self.spatial_enabled = bool(self.get_parameter('depth_filter.spatial.enabled').value)
         self.kernel_size = int(self.get_parameter('depth_filter.spatial.kernel_size').value)
         self.sigma_color = float(self.get_parameter('depth_filter.spatial.sigma_color').value)
         self.sigma_space = float(self.get_parameter('depth_filter.spatial.sigma_space').value)
@@ -64,17 +73,10 @@ class DepthPreprocessorNode(Node):
         self.get_logger().info(f'  -> Pub: {self.output_depth_topic}')
 
     def to_meters(self, depth_image: np.ndarray, encoding: str) -> np.ndarray:
-        depth_m = depth_image.astype(np.float32).copy()
-        if encoding in ['16UC1', '16uc1'] or self.depth_unit_scale != 1.0:
-            # Scale if explicitly encoded as mm, or if user overrides with a non-1 scale
-            # (assuming default scale in common.yaml might handle weird cases)
-            if encoding in ['16UC1', '16uc1'] and self.depth_unit_scale == 1.0:
-                 # Default scale for 16UC1 if not specified
-                 depth_m *= 0.001
-            else:
-                 depth_m *= self.depth_unit_scale
-        
-        return np.nan_to_num(depth_m, nan=0.0, posinf=0.0, neginf=0.0)
+        return sanitize_depth(
+            depth_image, encoding, self.depth_unit_scale,
+            self.min_depth, self.max_depth,
+        )
 
     def spatial_filter(self, depth_m: np.ndarray) -> np.ndarray:
         valid_mask = depth_m > 0
@@ -107,21 +109,22 @@ class DepthPreprocessorNode(Node):
         blended[overlap] = (self.temporal_alpha * current_depth[overlap] + 
                             (1.0 - self.temporal_alpha) * self.previous_filtered[overlap])
         
-        missing = ~c_mask & p_mask
-        blended[missing] = self.previous_filtered[missing]
-        
         return blended
 
     def depth_callback(self, msg: Image):
         try:
-            cv_img = self.bridge.imgmsg_to_cv2(msg, desired_encoding='32FC1').copy()
+            cv_img = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough').copy()
             depth_m = self.to_meters(cv_img, msg.encoding)
 
             if not self.enabled:
                 res = depth_m
             else:
-                res = self.spatial_filter(depth_m)
+                res = self.spatial_filter(depth_m) if self.spatial_enabled else depth_m
                 res = self.temporal_filter(res)
+                res = sanitize_depth(
+                    res, '32FC1', min_depth=self.min_depth,
+                    max_depth=self.max_depth,
+                )
 
             if self._log_count % 30 == 0:
                 self.get_logger().info(f"Stats: min={np.min(res):.2f}, max={np.max(res):.2f}, mean={np.mean(res):.2f}")
@@ -142,11 +145,15 @@ def main(args=None):
     node = DepthPreprocessorNode()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
+    except Exception:
+        if rclpy.ok():
+            raise
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            node.destroy_node()
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':
