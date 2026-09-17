@@ -6,12 +6,13 @@ set -euo pipefail
 #DEFAULT_BAG="data/rosbag2_2026_06_11-15_34_13/rosbag2_2026_06_11-15_34_13_0.mcap"
 #DEFAULT_BAG="data/exoskeleton_dataset_0_0_0/exoskeleton_dataset_0_0_0.mcap"
 #DEFAULT_BAG="data/exoskeleton_dataset_1_20_35/exoskeleton_dataset_1_20_35.mcap"
-DEFAULT_BAG="data/exoskeleton_dataset_2_10_40/exoskeleton_dataset_2_10_40.mcap"
+#DEFAULT_BAG="data/exoskeleton_dataset_2_10_40/exoskeleton_dataset_2_10_40.mcap"
+DEFAULT_BAG="data/exo20_head10_cone10_period2_20260917_211214/exo20_head10_cone10_period2_20260917_211214_0.mcap"
 
 #DEFAULT_BAG="data/TUM/rgbd_dataset_freiburg3_long_office_household_cloud.bag"
 #DEFAULT_BAG="data/TUM/rgbd_dataset_freiburg1_room_cloud.bag"
 
-PLAYBACK_RATE=0.6
+PLAYBACK_RATE=0.2
 USE_IMU=false
 PUBLISH_DEBUG_PCL=false
 LOOP_PLAYBACK=false
