@@ -10,6 +10,7 @@ Panels:
         - /HeadDebugCloud1
         - /ExoDebugCloud1
         - /VggtCloud1
+        - /VggtFusedLocalCloud1
         - /GroundTruthGlobalMap1
         - /GroundTruthOdometry1
       Splitter Ratio: 0.5
@@ -107,6 +108,18 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /vggt/combined_pointcloud
+      Value: true
+    - Class: rviz_default_plugins/PointCloud2
+      Color Transformer: RGB8
+      Enabled: true
+      Name: VggtFusedLocalCloud
+      Size (Pixels): 3
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /vggt/fused_local_pointcloud
       Value: true
     - Class: rviz_default_plugins/PointCloud2
       Color Transformer: RGB8

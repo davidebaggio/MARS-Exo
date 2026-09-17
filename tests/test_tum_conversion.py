@@ -34,3 +34,14 @@ def test_identical_camera_poses_make_identity_pair_transform():
     expected = points @ converter.LINK_FROM_OPTICAL[:3, :3].T
     assert np.allclose(cloud, np.vstack([expected, expected]))
     assert np.allclose(pair_transform, np.eye(4))
+
+
+def test_visible_map_uses_groundtruth_pose_and_voxel_deduplication():
+    pose = np.array([1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+    points = np.array([[0.0, 0.0, 1.0], [0.001, 0.0, 1.0]])
+    voxels = {}
+
+    converter.merge_world_voxels(voxels, points, pose, voxel_size=0.05)
+
+    assert len(voxels) == 1
+    assert np.allclose(next(iter(voxels.values())), [1.0, 0.0, 1.0])

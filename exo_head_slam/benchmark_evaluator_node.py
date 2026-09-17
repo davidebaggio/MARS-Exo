@@ -17,6 +17,7 @@ from rclpy.qos import (
     ReliabilityPolicy,
     qos_profile_sensor_data,
 )
+from rtabmap_msgs.msg import Info, MapData, MapGraph
 from scipy.spatial.transform import Rotation, Slerp
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
@@ -73,6 +74,27 @@ def visualization_alignment(world_from_camera, map_start_z):
     viz_ground_from_map = np.eye(4)
     viz_ground_from_map[2, 3] = map_start_z
     return world_from_camera @ np.linalg.inv(viz_ground_from_map)
+
+
+def trajectory_from_graph(graph, stamps):
+    """Join final optimized RTAB poses to timestamps reported for node IDs."""
+    trajectory = []
+    for node_id, pose in zip(graph.poses_id, graph.poses):
+        if node_id not in stamps:
+            continue
+        quaternion = np.array([
+            pose.orientation.x, pose.orientation.y,
+            pose.orientation.z, pose.orientation.w,
+        ])
+        norm = np.linalg.norm(quaternion)
+        if not np.isfinite(norm) or norm < 1e-12:
+            continue
+        trajectory.append((
+            stamps[node_id],
+            np.array([pose.position.x, pose.position.y, pose.position.z]),
+            quaternion / norm,
+        ))
+    return trajectory
 
 
 def match_trajectories(
@@ -139,9 +161,16 @@ def match_trajectories(
         )(times).as_quat()
         gt_matched_positions = camera_positions[target_indices]
         gt_matched_quaternions = np.asarray(camera_rotations)[target_indices]
-        segments = np.cumsum(np.r_[0, np.diff(target_indices) > 1])
+        segments = np.cumsum(np.r_[
+            0,
+            (np.diff(target_indices) > 1)
+            | (np.diff(times) > max_interpolation_gap),
+        ])
         target_count = len(gt_times)
 
+    observed_duration = float(np.sum(
+        np.diff(times)[segments[1:] == segments[:-1]]
+    ))
     return {
         'times': times,
         'estimated_positions': estimated_positions,
@@ -149,6 +178,7 @@ def match_trajectories(
         'gt_positions': gt_matched_positions,
         'gt_quaternions': gt_matched_quaternions,
         'segments': segments,
+        'observed_duration_s': observed_duration,
         'target_count': int(target_count),
         'raw_estimated_count': int(len(estimated_times)),
     }
@@ -238,7 +268,8 @@ def _trajectory_metrics(matched, scale, align_rotation, align_translation):
             matched.get('target_count', len(times)) - len(times)
         ),
         'tracked_segments': int(len(np.unique(segments))),
-        'duration_s': float(times[-1] - times[0]),
+        'duration_s': float(matched.get('observed_duration_s', times[-1] - times[0])),
+        'elapsed_span_s': float(times[-1] - times[0]),
         'ate_translation_m': stats(translation_error),
         'ate_rotation_deg': stats(rotation_error),
         'rpe_1s_translation_m': stats(rpe_translation),
@@ -307,6 +338,8 @@ class BenchmarkEvaluatorNode(Node):
         )
 
         self.estimated_trajectory = []
+        self.rtab_stamps = {}
+        self.optimized_graph = None
         self.gt_trajectory = []
         self.waist_from_camera = _transform(
             self.get_parameter('waist_to_exo_translation').value,
@@ -337,6 +370,15 @@ class BenchmarkEvaluatorNode(Node):
         )
         self.create_subscription(
             Odometry, '/exo_rtabmap/odom', self._estimated_odom, qos_profile_sensor_data
+        )
+        self.create_subscription(
+            Info, '/info', self._rtab_info, 10
+        )
+        self.create_subscription(
+            MapGraph, '/mapGraph', self._map_graph, transient_qos,
+        )
+        self.create_subscription(
+            MapData, '/mapData', self._map_data, 10,
         )
         self.create_subscription(
             Odometry, self.get_parameter('ground_truth_odom_topic').value,
@@ -382,6 +424,20 @@ class BenchmarkEvaluatorNode(Node):
         pose = self._pose(message)
         if pose is not None:
             self.estimated_trajectory.append(pose)
+
+    def _rtab_info(self, message):
+        if message.ref_id > 0:
+            stamp = message.header.stamp
+            self.rtab_stamps[message.ref_id] = stamp.sec + stamp.nanosec * 1e-9
+
+    def _map_graph(self, message):
+        self.optimized_graph = message
+
+    def _map_data(self, message):
+        self.optimized_graph = message.graph
+        for node in message.nodes:
+            if node.id > 0 and node.stamp > 0.0:
+                self.rtab_stamps[node.id] = node.stamp
 
     def _gt_odom(self, message):
         pose = self._pose(message)
@@ -494,24 +550,40 @@ class BenchmarkEvaluatorNode(Node):
         if has_maps and self.gt_map_frame != 'world':
             raise ValueError(f'Unexpected ground-truth map frame: {self.gt_map_frame}')
 
-        matched = match_trajectories(
+        odom_matched = match_trajectories(
             self.estimated_trajectory, self.gt_trajectory, self.waist_from_camera,
             max_interpolation_gap=1.0,
         )
+        odometry, _, _, _ = trajectory_metrics(odom_matched)
+        odometry['source_frame'] = 'odom'
+        sim_odometry, _, _, _, _ = similarity_trajectory_metrics(odom_matched)
+
+        estimated_trajectory = self.estimated_trajectory
+        trajectory_frame = 'odom'
+        if self.optimized_graph is not None:
+            optimized = trajectory_from_graph(self.optimized_graph, self.rtab_stamps)
+            if len(optimized) >= 3:
+                estimated_trajectory = optimized
+                trajectory_frame = 'map'
+        matched = match_trajectories(
+            estimated_trajectory, self.gt_trajectory, self.waist_from_camera,
+            max_interpolation_gap=1.0 if trajectory_frame == 'odom' else None,
+        )
         trajectory, rotation, translation, aligned_positions = trajectory_metrics(matched)
+        trajectory['source_frame'] = trajectory_frame
         sim_trajectory, scale, sim_rotation, sim_translation, _ = (
             similarity_trajectory_metrics(matched)
         )
         mapping = sim_mapping = None
         if has_maps:
             estimated_map = self.estimated_map
-            if self.estimated_map_frame == 'map':
+            if self.estimated_map_frame != trajectory_frame:
                 if self.map_from_odom is None:
                     raise ValueError('Missing final map -> odom transform')
-                odom_from_map = np.linalg.inv(self.map_from_odom)
-                estimated_map = (
-                    estimated_map @ odom_from_map[:3, :3].T + odom_from_map[:3, 3]
-                )
+                transform = self.map_from_odom
+                if trajectory_frame == 'odom':
+                    transform = np.linalg.inv(transform)
+                estimated_map = estimated_map @ transform[:3, :3].T + transform[:3, 3]
             aligned_map = estimated_map @ rotation.T + translation
             mapping = cloud_metrics(aligned_map, self.gt_map)
             sim_map = scale * (estimated_map @ sim_rotation.T) + sim_translation
@@ -519,6 +591,7 @@ class BenchmarkEvaluatorNode(Node):
 
         result = {
             'trajectory': trajectory,
+            'odometry': odometry,
             'map': mapping,
             'alignment': {
                 'rotation': rotation.tolist(),
@@ -526,6 +599,7 @@ class BenchmarkEvaluatorNode(Node):
             },
             'sim3_diagnostic': {
                 'trajectory': sim_trajectory,
+                'odometry': sim_odometry,
                 'map': sim_mapping,
                 'alignment': {
                     'scale': scale,

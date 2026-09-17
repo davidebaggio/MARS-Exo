@@ -6,11 +6,10 @@ set -euo pipefail
 #DEFAULT_BAG="data/rosbag2_2026_06_11-15_34_13/rosbag2_2026_06_11-15_34_13_0.mcap"
 #DEFAULT_BAG="data/exoskeleton_dataset_0_0_0/exoskeleton_dataset_0_0_0.mcap"
 #DEFAULT_BAG="data/exoskeleton_dataset_1_20_35/exoskeleton_dataset_1_20_35.mcap"
-#DEFAULT_BAG="data/exoskeleton_dataset_2_10_40/exoskeleton_dataset_2_10_40.mcap"
+DEFAULT_BAG="data/exoskeleton_dataset_2_10_40/exoskeleton_dataset_2_10_40.mcap"
 
 #DEFAULT_BAG="data/TUM/rgbd_dataset_freiburg3_long_office_household_cloud.bag"
 #DEFAULT_BAG="data/TUM/rgbd_dataset_freiburg1_room_cloud.bag"
-DEFAULT_BAG="data/TUM/rgbd_dataset_freiburg2_large_with_loop_cloud.bag"
 
 PLAYBACK_RATE=0.6
 USE_IMU=false
@@ -418,7 +417,7 @@ else
 	echo "Bag playback finished; draining pipeline for 5 seconds..."
 	sleep 5
 	if [[ "$EXOSKELETON_DATASET" == true || "$TUM_GROUND_TRUTH" == true ]]; then
-		if ! timeout 30 ros2 service call /benchmark_evaluator/finalize \
+		if ! timeout 120 ros2 service call /benchmark_evaluator/finalize \
 			std_srvs/srv/Trigger '{}' >/dev/null; then
 			echo "Benchmark evaluator service did not finish" >&2
 			exit 1

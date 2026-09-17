@@ -19,13 +19,15 @@ Data flow:
 ```text
 Head RGB + depth -> depth_preprocessor -> semantic_masker ---------.
                                                                    |
-Exo RGB + depth  -> depth_preprocessor -> semantic_masker -> RTAB-Map -> TF tree
+Exo raw RGB + sanitized depth ---------------------------> RTAB-Map -> TF tree
+Exo RGB + depth  -> depth_preprocessor -> semantic_masker ---.
                                             |                      |
                                             '-> VGGT-Omega solver -'
 
 VGGT-Omega solver -> /head/combined/depth_raw
 VGGT-Omega solver -> /exo/combined/depth_raw
 VGGT-Omega solver -> /vggt/combined_pointcloud
+VGGT-Omega solver -> /vggt/fused_local_pointcloud
 ```
 
 The expected TF structure is:
@@ -36,6 +38,8 @@ map -> odom -> exo_link -> head_link
 
 `/vggt/combined_pointcloud` is transformed into `exo_link` before publication,
 so its geometry stays consistent when the VGGT sliding-window world gauge changes.
+It contains learned VGGT geometry only. `/vggt/fused_local_pointcloud` is the
+0.15-5 m, 2 cm-voxel sensor-first planning cloud; rejected pairs publish exo-only data.
 
 ## Package Contents
 
@@ -144,16 +148,18 @@ Playback is one-shot at `0.3x`, with IMU and debug point clouds disabled by defa
 ./run.sh [--rate RATE] [--imu] [--debug-pcl] [--loop] [bag_path]
 ```
 
-Run the three exoskeleton recordings at window sizes 1, 2, 4 and 6 without
-RViz, then perform all offline VGGT cloud evaluations and generate reports:
+Run every rosbag2 dataset with `/ground_truth/odom` or `/exoskeleton/odom` at
+window sizes 1, 2, 4 and 6 without RViz, then perform offline VGGT cloud
+evaluations and generate reports:
 
 ```bash
 ./run_all_verified_evaluations.sh
 ```
 
-It writes a separate batch under `metrics/batch_windows/` and leaves existing
-`metrics/pipeline/` and `metrics/eval/` results untouched. Use `--rate RATE`
-to change pipeline playback speed.
+It skips datasets without ground truth, writes every result under
+`metrics/final_evals/`, and leaves existing `metrics/pipeline/` and `metrics/eval/`
+results untouched. Pipeline playback defaults to `0.1x`; use `--rate RATE` to
+change it. Offline cloud evaluation remains at `3.0x`.
 
 `run.sh` builds the package, sources the workspace, fixes Python shebangs, waits for the VGGT subscriptions to be ready, starts `/clock` playback, writes metrics under `metrics/pipeline/`, and opens `rviz/pipeline.rviz`. Metrics use `metrics_X_Y_W_Z`, where `X_Y_W` is the numeric dataset suffix and `Z` is `sliding_window_size`; rerunning the same configuration replaces its outputs. When visible-cloud ground truth is present, it records the VGGT cloud, ground-truth cloud, and odometry without evaluating them live. On shutdown it prints the `cloud_map_evaluation_launch.py` command that computes the CSV offline.
 
@@ -161,6 +167,10 @@ When the bag contains `/ground_truth/global_map`, `run.sh` automatically enables
 the simulated exoskeleton dataset profile: metric `32FC1` depth, isolated GT TF
 topics, one-shot playback, extrinsic GT metrics, and trajectory/map evaluation.
 Benchmark JSON and paired trajectory CSV files are written under `metrics/eval/`.
+Trajectory metrics use RTAB-Map's final optimized `mapData` graph and node
+timestamps; raw visual odometry is reported separately as `odometry`.
+Timestamp gaps split RPE segments and are excluded from `duration_s`
+(`elapsed_span_s` still reports wall-clock span).
 RViz also shows `/ground_truth/global_map` in green, aligned to the estimated
 map at the first GT camera pose. GT odometry and a conflict-free `gt_*` TF tree
 are enabled; visible cloud/map displays are available disabled.
@@ -190,6 +200,7 @@ VGGT-Omega outputs:
 - `/head/combined/depth_raw`
 - `/exo/combined/depth_raw`
 - `/vggt/combined_pointcloud`
+- `/vggt/fused_local_pointcloud`
 - TF `exo_link -> head_link`
 
 The VGGT point cloud uses `exo_link` as its message frame.
@@ -219,6 +230,11 @@ Important solver parameters:
 - `depth_conf_absolute`
 - `conf_gate_combine`
 - `conf_filter_pointcloud`
+- `min_pair_overlap`
+- `scale_min_support`
+- `scale_max_camera_disagreement`
+- `depth_edge_rtol`
+- `publish_fused_cloud`, `fused_cloud_min_depth`, `fused_cloud_max_depth`, `fused_cloud_voxel_size`
 - `metrics_enabled`
 - `metrics_csv_path`
 

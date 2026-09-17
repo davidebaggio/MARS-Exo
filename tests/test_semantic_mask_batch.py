@@ -6,6 +6,7 @@ import torch
 sys.modules.setdefault("cv_bridge", types.SimpleNamespace(CvBridge=object))
 
 from exo_head_slam.semantic_masker_node import YOLOSegModel
+from exo_head_slam.utils.vision_utils import dilate_mask
 
 
 def test_result_mask_filters_confidence_and_classes_before_gpu_merge():
@@ -25,3 +26,9 @@ def test_result_mask_filters_confidence_and_classes_before_gpu_merge():
     mask = YOLOSegModel._mask_tensor_from_result(result, (2, 2), 0.25, [0])
 
     assert mask.cpu().tolist() == [[1, 0], [0, 0]]
+
+
+def test_mask_dilation_covers_uncertain_boundary():
+    mask = torch.zeros(7, 7, dtype=torch.uint8).numpy()
+    mask[3, 3] = 1
+    assert int(dilate_mask(mask, 1).sum()) == 9

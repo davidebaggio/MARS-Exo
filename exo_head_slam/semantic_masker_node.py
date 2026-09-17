@@ -9,7 +9,7 @@ import os
 import torch
 import torch.nn.functional as F
 from typing import List, Optional
-from .utils.vision_utils import apply_semantic_mask
+from .utils.vision_utils import apply_semantic_mask, dilate_mask
 
 
 class YOLOSegModel:
@@ -103,6 +103,7 @@ class SemanticMaskerNode(Node):
             self.declare_parameter(f'{camera}.conf_threshold', 0.25)
             self.declare_parameter(f'{camera}.dynamic_classes', [0])
         self.declare_parameter('masker.model_path', 'yolov8n-seg.pt')
+        self.declare_parameter('mask_dilation_px', 5)
         self.declare_parameter('sync_slop', 0.035)
 
         self.topics = {
@@ -120,6 +121,7 @@ class SemanticMaskerNode(Node):
             list(self.get_parameter(f'{camera}.dynamic_classes').value or [])
             for camera in ('head', 'exo')
         ]
+        self.mask_dilation_px = int(self.get_parameter('mask_dilation_px').value)
 
         self.model = YOLOSegModel(self.get_parameter('masker.model_path').value)
         self.bridge = CvBridge()
@@ -167,7 +169,12 @@ class SemanticMaskerNode(Node):
                 self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
                 for msg in (h_depth, e_depth)
             ]
-            masks = self.model.predict(rgb_images, self.conf_thresholds, self.dynamic_classes)
+            masks = [
+                dilate_mask(mask, self.mask_dilation_px)
+                for mask in self.model.predict(
+                    rgb_images, self.conf_thresholds, self.dynamic_classes
+                )
+            ]
 
             for camera, rgb_msg, depth_msg, rgb_image, depth_image, mask in zip(
                 ('head', 'exo'),
@@ -177,10 +184,11 @@ class SemanticMaskerNode(Node):
                 depth_images,
                 masks,
             ):
-                masked_depth = depth_image.copy()
-                masked_depth[mask > 0] = 0
+                masked_depth = depth_image.astype(np.float32, copy=True)
+                # NaN distinguishes semantic exclusions from ordinary holes.
+                masked_depth[mask > 0] = np.nan
                 rgb_out = self.bridge.cv2_to_imgmsg(apply_semantic_mask(rgb_image, mask), encoding='bgr8')
-                depth_out = self.bridge.cv2_to_imgmsg(masked_depth, encoding=depth_msg.encoding)
+                depth_out = self.bridge.cv2_to_imgmsg(masked_depth, encoding='32FC1')
                 rgb_out.header = rgb_msg.header
                 depth_out.header = depth_msg.header
                 self.masked_publishers[camera][0].publish(rgb_out)

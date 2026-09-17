@@ -106,7 +106,7 @@ def generate_launch_description():
     benchmark_output_prefix = LaunchConfiguration('benchmark_output_prefix')
 
     sliding_window_size_arg = DeclareLaunchArgument(
-        'sliding_window_size', default_value='4',
+        'sliding_window_size', default_value='6',
         description='VGGT extrinsic-solver temporal window size',
     )
     sliding_window_size = LaunchConfiguration('sliding_window_size')
@@ -117,7 +117,7 @@ def generate_launch_description():
         package='exo_head_slam',
         executable='sequence_pair_adapter',
         name='sequence_pair_adapter',
-        parameters=[common_params],
+        parameters=[common_config, common_params],
         condition=IfCondition(coupled_sequence_dataset),
     )
 

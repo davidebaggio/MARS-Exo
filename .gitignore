@@ -3,7 +3,10 @@ build/
 .coverage
 coverage.xml
 *.csv
-data
+data/*
+!data/TUM/
+data/TUM/*
+!data/TUM/add_pointclouds_to_bagfile.py
 .DS_Store
 # Editor / OS
 *.egg-info/

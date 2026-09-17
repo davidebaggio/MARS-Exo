@@ -1,18 +1,16 @@
 #!/usr/bin/env bash
-# Run every dataset/window configuration headlessly, then evaluate all saved VGGT clouds.
+# Run every ground-truth dataset/window configuration headlessly.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PIPELINE_DIR="metrics/batch_windows/pipeline"
-EVAL_DIR="metrics/batch_windows/eval"
-DATASETS=(0_0_0 1_20_35 2_10_40)
+OUTPUT_DIR="metrics/final_evals"
 WINDOWS=(1 2 4 6)
 
 usage() {
 	echo "Usage: $0 [--rate RATE]"
 }
 
-RATE=""
+RATE="0.08"
 while (( $# > 0 )); do
 	case "$1" in
 		--rate)
@@ -31,35 +29,25 @@ source /opt/ros/jazzy/setup.bash
 set -u
 make build
 
-for dataset in "${DATASETS[@]}"; do
-	bag="$ROOT/data/exoskeleton_dataset_${dataset}/exoskeleton_dataset_${dataset}.mcap"
-	[[ -f "$bag" ]] || { echo "Bag not found: $bag" >&2; exit 1; }
+shopt -s globstar nullglob
+DATASETS=()
+for metadata in data/**/metadata.yaml; do
+	bag="${metadata%/metadata.yaml}"
+	#grep -Eq 'name: /(ground_truth/odom|exoskeleton/odom)' "$metadata" && DATASETS+=("$bag")
+	grep -Eq 'name: /(ground_truth/odom)' "$metadata" && DATASETS+=("$bag")
+done
+(( ${#DATASETS[@]} > 0 )) || { echo "No ground-truth datasets found." >&2; exit 1; }
+
+mkdir -p "$OUTPUT_DIR"
+for bag in "${DATASETS[@]}"; do
+	dataset="$(basename "$bag")"
+	dataset="${dataset%.bag}"
 	for window in "${WINDOWS[@]}"; do
 		echo "===== pipeline: dataset=${dataset}, window=${window} ====="
-		args=(--headless --no-build --window "$window" --metrics-dir "$PIPELINE_DIR" --eval-dir "$EVAL_DIR")
-		[[ -z "$RATE" ]] || args+=(--rate "$RATE")
+		args=(--headless --no-build --window "$window" --metrics-dir "$OUTPUT_DIR" --eval-dir "$OUTPUT_DIR" --rate "$RATE")
 		./run.sh "${args[@]}" "$bag"
 	done
 done
 
-set +u
-source install/setup.bash
-set -u
-for dataset in "${DATASETS[@]}"; do
-	for window in "${WINDOWS[@]}"; do
-		name="metrics_${dataset}_${window}"
-		cloud_bag="$PIPELINE_DIR/${name}_cloud_bag"
-		cloud_csv="$PIPELINE_DIR/${name}_cloud.csv"
-		[[ -f "$cloud_bag/metadata.yaml" ]] || { echo "Cloud bag missing: $cloud_bag" >&2; exit 1; }
-		echo "===== cloud evaluation: dataset=${dataset}, window=${window} ====="
-		ros2 launch exo_head_slam cloud_map_evaluation_launch.py \
-			bag_path:="$cloud_bag" metrics_csv_path:="$cloud_csv" \
-			playback_rate:=3.0 global:=true
-		EVAL_DIR="$EVAL_DIR" python3 plot_metrics.py "$PIPELINE_DIR/${name}.csv"
-		EVAL_DIR="$EVAL_DIR" python3 plot_metrics.py "${cloud_csv%.csv}_global.csv"
-	done
-done
-
-echo "All 12 pipeline and cloud evaluations completed."
-echo "Pipeline CSVs: $ROOT/$PIPELINE_DIR"
-echo "Reports and plots: $ROOT/$EVAL_DIR"
+echo "All $((${#DATASETS[@]} * ${#WINDOWS[@]})) evaluations completed."
+echo "Results: $ROOT/$OUTPUT_DIR"

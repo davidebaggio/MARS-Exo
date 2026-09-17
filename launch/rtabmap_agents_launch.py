@@ -69,6 +69,7 @@ def generate_launch_description():
     common_config_path = os.path.join(config_dir, 'common.yaml')
 
     exo_params = load_section(exo_config_path, 'exo_rtabmap')
+    slam_params = load_section(exo_config_path, 'exo_slam')
 
     # Extract topic names for remapping, don't pass them as ROS params
     # (they'd conflict with the remapping mechanism in rtabmap_slam)
@@ -138,20 +139,26 @@ def generate_launch_description():
         package='rtabmap_slam',
         executable='rtabmap',
         name='exo_rtabmap',
-        parameters=[{**base_params, **exo_params, 'publish_tf': True, 'subscribe_odom_info': True}],
+        parameters=[{
+            **base_params,
+            **exo_params,
+            **slam_params,
+            'publish_tf': True,
+            'subscribe_rgb': False,
+            'subscribe_depth': False,
+            'subscribe_rgbd': True,
+            'subscribe_odom_info': True,
+        }],
         arguments=['-d'],
         remappings=[
-            ('rgb/image', rgb_topic),
-            ('depth/image', depth_topic),
-            ('rgb/camera_info', camera_info_topic),
-            ('depth/camera_info', camera_info_topic),
+            ('rgbd_image', 'odom_rgbd_image'),
             ('odom', odom_topic),
             ('grid_map', '/map'),
         ],
         output='screen'
     )
 
-    # Map Assembler: subscribes to core SLAM's map_graph and publishes /exo_rtabmap/cloud_map.
+    # Map Assembler: subscribes to core SLAM's /mapData and publishes the cloud map.
     # Delayed 5s so rtabmap/get_map_data service is available at startup (avoids WARN
     # and ensures full cloud map appears immediately rather than growing incrementally).
     map_assembler = TimerAction(
@@ -163,7 +170,6 @@ def generate_launch_description():
                 name='map_assembler',
                 parameters=[common_config_path, {'use_sim_time': use_sim_time}],
                 remappings=[
-                    ('map_graph', '/exo_rtabmap/map_graph'),
                     ('cloud_map', '/exo_rtabmap/cloud_map'),
                 ],
                 output='screen'

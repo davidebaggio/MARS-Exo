@@ -4,10 +4,13 @@ exo_depth_preprocessor:
     output_depth_topic: "/exo/filtered/depth_raw"
     depth_filter.enabled: true
     depth_filter.depth_unit_scale: 0.001
+    depth_filter.min_depth: 0.1
+    depth_filter.max_depth: 10.0
+    depth_filter.spatial.enabled: true
     depth_filter.spatial.kernel_size: 5
     depth_filter.spatial.sigma_color: 0.08
     depth_filter.spatial.sigma_space: 3.0
-    depth_filter.temporal.enabled: true
+    depth_filter.temporal.enabled: false
     depth_filter.temporal.alpha: 0.6
 
 exo_rtabmap:
@@ -29,16 +32,29 @@ exo_rtabmap:
     Grid/MaxGroundHeight: "0.1"
     Grid/MaxObstacleHeight: "2.0"
     Odom/Strategy: "0" # Frame-to-Map visual odometry
-    Odom/ResetCountdown: "3" # reinitialize after three consecutive registration failures
-    OdomF2M/BundleAdjustment: "0" # avoid BA dropping otherwise usable low-inlier frames
+    Odom/ResetCountdown: "15" # tolerate short blur/dropout bursts before resetting
+    OdomF2M/BundleAdjustment: "0" # RGB-D 3D correspondences are more stable without local BA
     Vis/EstimationType: "0" # 3D->3D
-    Vis/MinInliers: "8"
+    Vis/MinInliers: "8" # TUM fast motion often leaves 8-19 BA-verified correspondences
     Vis/InlierDistance: "0.1"
-    Vis/CorGuessWinSize: "0"
+    Vis/CorGuessWinSize: "0" # allow global matching during rapid head rotations
     Vis/FeatureType: "8" # GFTT/ORB
     Vis/MaxFeatures: "1000"
     # Smoothing & Convergence parameters
-    Rtabmap/DetectionRate: "1"
-    RGBD/LinearUpdate: "0.01"
-    RGBD/AngularUpdate: "0.01"
-    RGBD/OptimizeMaxError: "0.1"
+    Rtabmap/DetectionRate: "1" # preserve revisits across both slow and fast sequences
+    Rtabmap/CreateIntermediateNodes: "true"
+    RGBD/LinearUpdate: "0"
+    RGBD/AngularUpdate: "0"
+    RGBD/OptimizeMaxError: "3.0"
+    Mem/SaveDepth16Format: "true" # lossless enough at 1 mm; enables RTAB-Map depth compression
+    Mem/UseOdomFeatures: "true"
+
+exo_slam:
+  ros__parameters:
+    # Robust place recognition/closure registration. Odometry keeps fast GFTT/ORB.
+    Mem/UseOdomFeatures: "false"
+    Kp/DetectorStrategy: "1" # SIFT vocabulary
+    Kp/MaxFeatures: "500"
+    RGBD/LoopClosureReextractFeatures: "true"
+    Vis/FeatureType: "1" # SIFT closure registration
+    Vis/MaxFeatures: "500"

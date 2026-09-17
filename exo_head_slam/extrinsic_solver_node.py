@@ -12,11 +12,21 @@ import message_filters
 import tf2_ros
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
-from sensor_msgs.msg import Image, PointCloud2, PointField
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import CameraInfo, Image, PointCloud2, PointField
 from geometry_msgs.msg import TransformStamped
 from tf2_msgs.msg import TFMessage
 from cv_bridge import CvBridge
-from .utils.vision_utils import blend_depth_holes, transform_points, unproject_depth_np
+from .utils.vision_utils import (
+    bidirectional_overlap,
+    blend_depth_holes,
+    camera_points_from_depth,
+    depth_edge_mask,
+    robust_metric_scale,
+    transform_points,
+    unproject_depth_np,
+    voxel_keep_first,
+)
 
 # Locate vggt-omega directory dynamically
 _current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -54,6 +64,8 @@ class ExtrinsicSolverNode(Node):
         self.declare_parameter('head_depth_topic', '/head/masked/depth_raw')
         self.declare_parameter('exo_rgb_topic', '/exo/masked/image_raw')
         self.declare_parameter('exo_depth_topic', '/exo/masked/depth_raw')
+        self.declare_parameter('head_camera_info_topic', '/camera/head/color/camera_info')
+        self.declare_parameter('exo_camera_info_topic', '/camera/exo/color/camera_info')
         self.declare_parameter('head_frame_id', 'head_link')
         self.declare_parameter('exo_frame_id', 'exo_link')
         self.declare_parameter('tf_filter_alpha', 0.5)
@@ -71,6 +83,15 @@ class ExtrinsicSolverNode(Node):
         self.declare_parameter('conf_filter_pointcloud', True)        # percentile filter /vggt/combined_pointcloud
         self.declare_parameter('pcl_require_raw_support', False)      # require raw depth for VGGT cloud pixels
         self.declare_parameter('pcl_max_depth_residual', 0.25)         # drop raw pixels where VGGT disagrees too much
+        self.declare_parameter('depth_edge_rtol', 0.03)
+        self.declare_parameter('min_pair_overlap', 0.15)
+        self.declare_parameter('scale_min_support', 1000)
+        self.declare_parameter('scale_max_camera_disagreement', 0.15)
+        self.declare_parameter('publish_fused_cloud', True)
+        self.declare_parameter('fused_cloud_topic', '/vggt/fused_local_pointcloud')
+        self.declare_parameter('fused_cloud_min_depth', 0.15)
+        self.declare_parameter('fused_cloud_max_depth', 5.0)
+        self.declare_parameter('fused_cloud_voxel_size', 0.02)
 
         self.declare_parameter('metrics_enabled', False)
         self.declare_parameter('metrics_csv_path', 'extrinsic_metrics.csv')
@@ -84,6 +105,8 @@ class ExtrinsicSolverNode(Node):
         self.head_depth_topic = self.get_parameter('head_depth_topic').value
         self.exo_rgb_topic = self.get_parameter('exo_rgb_topic').value
         self.exo_depth_topic = self.get_parameter('exo_depth_topic').value
+        self.head_camera_info_topic = self.get_parameter('head_camera_info_topic').value
+        self.exo_camera_info_topic = self.get_parameter('exo_camera_info_topic').value
         self.head_frame_id = self.get_parameter('head_frame_id').value
         self.exo_frame_id = self.get_parameter('exo_frame_id').value
         self.tf_filter_alpha = float(self.get_parameter('tf_filter_alpha').value)
@@ -102,6 +125,17 @@ class ExtrinsicSolverNode(Node):
         self.conf_filter_pointcloud = bool(self.get_parameter('conf_filter_pointcloud').value)
         self.pcl_require_raw_support = bool(self.get_parameter('pcl_require_raw_support').value)
         self.pcl_max_depth_residual = float(self.get_parameter('pcl_max_depth_residual').value)
+        self.depth_edge_rtol = float(self.get_parameter('depth_edge_rtol').value)
+        self.min_pair_overlap = float(self.get_parameter('min_pair_overlap').value)
+        self.scale_min_support = int(self.get_parameter('scale_min_support').value)
+        self.scale_max_camera_disagreement = float(
+            self.get_parameter('scale_max_camera_disagreement').value
+        )
+        self.publish_fused_cloud = bool(self.get_parameter('publish_fused_cloud').value)
+        self.fused_cloud_topic = self.get_parameter('fused_cloud_topic').value
+        self.fused_cloud_min_depth = float(self.get_parameter('fused_cloud_min_depth').value)
+        self.fused_cloud_max_depth = float(self.get_parameter('fused_cloud_max_depth').value)
+        self.fused_cloud_voxel_size = float(self.get_parameter('fused_cloud_voxel_size').value)
 
         self.metrics_enabled = self.get_parameter('metrics_enabled').value
         self.metrics_csv_path = self.get_parameter('metrics_csv_path').value
@@ -155,11 +189,17 @@ class ExtrinsicSolverNode(Node):
         self.dino_feature_buffer = []
         self.last_solver_time = None
         self.cycle_start_time = None
+        self.latest_head_info = None
+        self.latest_exo_info = None
+        self._quality_metrics = {}
 
         # Publishers
         self.head_combined_depth_pub = self.create_publisher(Image, '/head/combined/depth_raw', 10)
         self.exo_combined_depth_pub = self.create_publisher(Image, '/exo/combined/depth_raw', 10)
         self.vggt_pcl_pub = self.create_publisher(PointCloud2, '/vggt/combined_pointcloud', 10)
+        self.fused_pcl_pub = self.create_publisher(
+            PointCloud2, self.fused_cloud_topic, 10
+        )
 
         # Initialize VGGT-Omega on CUDA
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -186,6 +226,16 @@ class ExtrinsicSolverNode(Node):
         self.head_depth_sub = message_filters.Subscriber(self, Image, self.head_depth_topic)
         self.exo_rgb_sub = message_filters.Subscriber(self, Image, self.exo_rgb_topic)
         self.exo_depth_sub = message_filters.Subscriber(self, Image, self.exo_depth_topic)
+        self.head_info_sub = self.create_subscription(
+            CameraInfo, self.head_camera_info_topic,
+            lambda message: setattr(self, 'latest_head_info', message),
+            qos_profile_sensor_data,
+        )
+        self.exo_info_sub = self.create_subscription(
+            CameraInfo, self.exo_camera_info_topic,
+            lambda message: setattr(self, 'latest_exo_info', message),
+            qos_profile_sensor_data,
+        )
 
         self.ts = message_filters.ApproximateTimeSynchronizer(
             [self.head_rgb_sub, self.head_depth_sub, self.exo_rgb_sub, self.exo_depth_sub],
@@ -202,48 +252,74 @@ class ExtrinsicSolverNode(Node):
     def preprocess_cv2_image(self, cv_img, target_size=512):
         rgb_img = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
         h, w, _ = rgb_img.shape
-
-        new_width = target_size
-        new_height = int(round(h * (target_size / w) / 16) * 16)
-
+        scale = target_size / max(h, w)
+        new_width = max(16, int(round(w * scale / 16)) * 16)
+        new_height = max(16, int(round(h * scale / 16)) * 16)
         resized = cv2.resize(rgb_img, (new_width, new_height), interpolation=cv2.INTER_CUBIC)
-
-        crop_y = 0
-        if new_height > target_size:
-            crop_y = (new_height - target_size) // 2
-            resized = resized[crop_y : crop_y + target_size, :]
-
         tensor = torch.from_numpy(resized).permute(2, 0, 1).float() / 255.0
-        return tensor, h, w, new_height, crop_y
+        return tensor, h, w, new_height, 0
 
     def postprocess_depth(self, pred_arr, orig_h, orig_w, new_height, crop_y, target_size=512):
-        if new_height > target_size:
-            canvas = np.zeros((new_height, target_size), dtype=np.float32)
-            canvas[crop_y : crop_y + target_size, :] = pred_arr
-            if crop_y > 0:
-                canvas[:crop_y, :] = pred_arr[0, :]
-                canvas[crop_y + target_size :, :] = pred_arr[-1, :]
-            arr_resized = canvas
-        else:
-            arr_resized = pred_arr
+        return cv2.resize(pred_arr, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
 
-        arr_orig = cv2.resize(arr_resized, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
-        return arr_orig
+    def preprocess_depth_map(self, depth_arr, model_shape):
+        return cv2.resize(
+            depth_arr, (model_shape[1], model_shape[0]),
+            interpolation=cv2.INTER_NEAREST,
+        )
 
-    def preprocess_depth_map(self, depth_arr, new_height, crop_y, target_size=512):
-        depth_resized = cv2.resize(depth_arr, (target_size, new_height), interpolation=cv2.INTER_NEAREST)
-        if new_height > target_size:
-            return depth_resized[crop_y : crop_y + target_size, :]
-        return depth_resized
+    @staticmethod
+    def camera_intrinsic(camera_info, fallback, model_shape, image_shape):
+        """Use calibrated CameraInfo, or resize model intrinsics as fallback."""
+        if camera_info is not None and camera_info.k[0] > 0.0 and camera_info.k[4] > 0.0:
+            return np.asarray(camera_info.k, dtype=np.float64).reshape(3, 3)
+        intrinsic = np.asarray(fallback, dtype=np.float64).copy()
+        model_h, model_w = model_shape
+        image_h, image_w = image_shape
+        intrinsic[0, :] *= image_w / model_w
+        intrinsic[1, :] *= image_h / model_h
+        intrinsic[2, :] = [0.0, 0.0, 1.0]
+        return intrinsic
 
-    def blend_depth(self, raw_depth, pred_depth, raw_valid, conf_mask):
+    def blend_depth(self, raw_depth, pred_depth, raw_valid, conf_mask, fillable_mask=None):
         return blend_depth_holes(
             raw_depth,
             pred_depth,
             raw_valid,
             conf_mask,
             self.conf_gate_combine,
+            fillable_mask,
         )
+
+    @staticmethod
+    def pointcloud_message(points, colors, frame_id, stamp):
+        data = np.zeros(len(points), dtype=[
+            ('x', np.float32), ('y', np.float32), ('z', np.float32),
+            ('rgb', np.uint32),
+        ])
+        data['x'], data['y'], data['z'] = points.T
+        data['rgb'] = (
+            (colors[:, 0].astype(np.uint32) << 16)
+            | (colors[:, 1].astype(np.uint32) << 8)
+            | colors[:, 2].astype(np.uint32)
+        )
+        message = PointCloud2()
+        message.header.frame_id = frame_id
+        message.header.stamp = stamp
+        message.height = 1
+        message.width = len(points)
+        message.is_dense = False
+        message.is_bigendian = False
+        message.fields = [
+            PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
+            PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
+            PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
+            PointField(name='rgb', offset=12, datatype=PointField.UINT32, count=1),
+        ]
+        message.point_step = 16
+        message.row_step = 16 * len(points)
+        message.data = data.tobytes()
+        return message
 
     def tf_to_matrix(self, tf):
         mat = np.eye(4)
@@ -277,277 +353,241 @@ class ExtrinsicSolverNode(Node):
         from scipy.spatial.transform import Rotation as R
 
         stamp_sec = h_rgb.header.stamp.sec + h_rgb.header.stamp.nanosec * 1e-9
-
         run_solver = (self.last_solver_time is None or
                       (stamp_sec - self.last_solver_time) >= self.min_solver_interval)
+        if not run_solver:
+            return
 
-        if run_solver:
-            self.cycle_start_time = time.perf_counter()
-            self.get_logger().info("Solver: received synced quad. Estimating extrinsic & depth with VGGT-Omega...")
-            scale = 1.0
-            head_depth_rmse = head_depth_mae = None
-            exo_depth_rmse = exo_depth_mae = None
-            head_conf_stats = None
-            exo_conf_stats = None
-            conf_thr = None
-            try:
-                head_img = self.bridge.imgmsg_to_cv2(h_rgb, 'bgr8')
-                head_dep = self.bridge.imgmsg_to_cv2(h_depth, 'passthrough')
-                exo_img = self.bridge.imgmsg_to_cv2(e_rgb, 'bgr8')
-                exo_dep = self.bridge.imgmsg_to_cv2(e_depth, 'passthrough')
+        self.last_solver_time = stamp_sec
+        self.cycle_start_time = time.perf_counter()
+        self._quality_metrics = {}
+        scale = 1.0
+        head_depth_rmse = head_depth_mae = None
+        exo_depth_rmse = exo_depth_mae = None
+        head_conf_stats = exo_conf_stats = None
+        conf_thr = None
+        try:
+            head_img = self.bridge.imgmsg_to_cv2(h_rgb, 'bgr8')
+            exo_img = self.bridge.imgmsg_to_cv2(e_rgb, 'bgr8')
+            head_dep = self.bridge.imgmsg_to_cv2(h_depth, 'passthrough').astype(np.float32)
+            exo_dep = self.bridge.imgmsg_to_cv2(e_depth, 'passthrough').astype(np.float32)
+            h_semantic = ~np.isfinite(head_dep)
+            e_semantic = ~np.isfinite(exo_dep)
 
-                h_tensor, h_orig_h, h_orig_w, h_new_h, h_crop_y = self.preprocess_cv2_image(head_img)
-                e_tensor, e_orig_h, e_orig_w, e_new_h, e_crop_y = self.preprocess_cv2_image(exo_img)
+            h_tensor, h_orig_h, h_orig_w, h_new_h, h_crop_y = self.preprocess_cv2_image(head_img)
+            e_tensor, e_orig_h, e_orig_w, e_new_h, e_crop_y = self.preprocess_cv2_image(exo_img)
+            next_image_buffer = [*self.image_buffer, (h_tensor, e_tensor)][-self.sliding_window_size:]
+            all_tensors = [image for pair in next_image_buffer for image in pair]
+            images = torch.stack(all_tensors).unsqueeze(0).to(self.device)
+            new_images = torch.stack([h_tensor, e_tensor]).unsqueeze(0).to(self.device)
+            pair_count = len(next_image_buffer)
 
-                next_image_buffer = [*self.image_buffer, (h_tensor, e_tensor)][-self.sliding_window_size:]
-
-                all_tensors = []
-                for hb, eb in next_image_buffer:
-                    all_tensors.extend([hb, eb])
-                images = torch.stack(all_tensors).unsqueeze(0).to(self.device)
-                new_images = torch.stack([h_tensor, e_tensor]).unsqueeze(0).to(self.device)
-                M = len(next_image_buffer)
-
-                with torch.no_grad(), self.autocast_ctx:
-                    new_dino_features = self.model.extract_dino_features(new_images)
-                    next_dino_feature_buffer = [*self.dino_feature_buffer, new_dino_features][
-                        -self.sliding_window_size:
-                    ]
-                    predictions = self.model(
-                        images,
-                        dino_features=torch.cat(next_dino_feature_buffer, dim=0),
-                        depth_frame_range=(2 * M - 2, 2 * M),
-                    )
-                    extrinsic, intrinsic = encoding_to_camera(predictions["pose_enc"], predictions["images"].shape[-2:])
-                    depth_map = predictions["depth"]
-                    depth_conf = predictions["depth_conf"]
-
-                self.image_buffer = next_image_buffer
-                self.dino_feature_buffer = next_dino_feature_buffer
-
-                E_head = extrinsic[0, 2 * M - 2].cpu().float().numpy()
-                E_exo = extrinsic[0, 2 * M - 1].cpu().float().numpy()
-
-                h_pred_depth = depth_map[0, 0, ..., 0].cpu().float().numpy()
-                e_pred_depth = depth_map[0, 1, ..., 0].cpu().float().numpy()
-                h_conf = depth_conf[0, 0].cpu().float().numpy()
-                e_conf = depth_conf[0, 1].cpu().float().numpy()
-
-                self.get_logger().info(
-                    f"VGGT-Omega: depth_map={depth_map.shape} depth_conf={depth_conf.shape}"
+            with torch.no_grad(), self.autocast_ctx:
+                new_features = self.model.extract_dino_features(new_images)
+                next_features = [*self.dino_feature_buffer, new_features][-self.sliding_window_size:]
+                predictions = self.model(
+                    images,
+                    dino_features=torch.cat(next_features, dim=0),
+                    depth_frame_range=(2 * pair_count - 2, 2 * pair_count),
                 )
+                extrinsic, intrinsic = encoding_to_camera(
+                    predictions['pose_enc'], predictions['images'].shape[-2:]
+                )
+            self.image_buffer = next_image_buffer
+            self.dino_feature_buffer = next_features
 
-                # Postprocess depth maps back to original dimensions
-                h_pred_orig = self.postprocess_depth(h_pred_depth, h_orig_h, h_orig_w, h_new_h, h_crop_y)
-                e_pred_orig = self.postprocess_depth(e_pred_depth, e_orig_h, e_orig_w, e_new_h, e_crop_y)
-                # Postprocess depth_conf back to original dimensions for combine gating
-                h_conf_orig = self.postprocess_depth(h_conf, h_orig_h, h_orig_w, h_new_h, h_crop_y)
-                e_conf_orig = self.postprocess_depth(e_conf, e_orig_h, e_orig_w, e_new_h, e_crop_y)
+            E_head = extrinsic[0, -2].cpu().float().numpy()
+            E_exo = extrinsic[0, -1].cpu().float().numpy()
+            h_intrinsic = intrinsic[0, -2].cpu().float().numpy()
+            e_intrinsic = intrinsic[0, -1].cpu().float().numpy()
+            h_pred_depth = predictions['depth'][0, 0, ..., 0].cpu().float().numpy()
+            e_pred_depth = predictions['depth'][0, 1, ..., 0].cpu().float().numpy()
+            h_conf = predictions['depth_conf'][0, 0].cpu().float().numpy()
+            e_conf = predictions['depth_conf'][0, 1].cpu().float().numpy()
 
-                # Scale alignment logic
-                scale_head = scale_exo = None
-                h_valid = (head_dep > 0.1) & (head_dep < 10.0) & (~np.isnan(head_dep)) & (~np.isinf(head_dep))
-                if np.sum(h_valid) > 10:
-                    scale_head = np.median(head_dep[h_valid] / h_pred_orig[h_valid])
+            h_pred_orig = self.postprocess_depth(h_pred_depth, h_orig_h, h_orig_w, h_new_h, h_crop_y)
+            e_pred_orig = self.postprocess_depth(e_pred_depth, e_orig_h, e_orig_w, e_new_h, e_crop_y)
+            h_conf_orig = self.postprocess_depth(h_conf, h_orig_h, h_orig_w, h_new_h, h_crop_y)
+            e_conf_orig = self.postprocess_depth(e_conf, e_orig_h, e_orig_w, e_new_h, e_crop_y)
+            h_conf_mask_orig = self._conf_mask(h_conf_orig)
+            e_conf_mask_orig = self._conf_mask(e_conf_orig)
+            conf_thr = self._conf_threshold(np.concatenate([h_conf_orig.ravel(), e_conf_orig.ravel()]))
 
-                e_valid = (exo_dep > 0.1) & (exo_dep < 10.0) & (~np.isnan(exo_dep)) & (~np.isinf(exo_dep))
-                if np.sum(e_valid) > 10:
-                    scale_exo = np.median(exo_dep[e_valid] / e_pred_orig[e_valid])
+            scale_valid = True
+            scale_status = 'SUCCESS'
+            try:
+                scale, camera_scales, supports = robust_metric_scale(
+                    [head_dep, exo_dep], [h_pred_orig, e_pred_orig],
+                    [h_conf_mask_orig, e_conf_mask_orig], self.scale_min_support,
+                    self.scale_max_camera_disagreement, self.depth_edge_rtol,
+                )
+            except ValueError as error:
+                scale_valid = False
+                scale_status = 'SCALE_REJECTED'
+                camera_scales, supports = [None, None], [0, 0]
+                self.get_logger().warn(str(error))
+            self._quality_metrics.update({
+                'head_scale': camera_scales[0], 'exo_scale': camera_scales[1],
+                'head_scale_support': supports[0], 'exo_scale_support': supports[1],
+            })
 
-                if scale_head is not None and scale_exo is not None:
-                    scale = (scale_head + scale_exo) / 2.0
-                elif scale_head is not None:
-                    scale = scale_head
-                elif scale_exo is not None:
-                    scale = scale_exo
+            h_pred_orig_scaled = h_pred_orig * scale
+            e_pred_orig_scaled = e_pred_orig * scale
+            E_head_scaled = E_head.copy()
+            E_exo_scaled = E_exo.copy()
+            E_head_scaled[:3, 3] *= scale
+            E_exo_scaled[:3, 3] *= scale
+            h_valid = np.isfinite(head_dep) & (head_dep > 0.1) & (head_dep < 10.0)
+            e_valid = np.isfinite(exo_dep) & (exo_dep > 0.1) & (exo_dep < 10.0)
+            h_fill_conf = h_conf_mask_orig & scale_valid
+            e_fill_conf = e_conf_mask_orig & scale_valid
+            h_combined = self.blend_depth(
+                head_dep, h_pred_orig_scaled, h_valid, h_fill_conf, ~h_semantic
+            )
+            e_combined = self.blend_depth(
+                exo_dep, e_pred_orig_scaled, e_valid, e_fill_conf, ~e_semantic
+            )
+            for publisher, combined, source in (
+                (self.head_combined_depth_pub, h_combined, h_depth),
+                (self.exo_combined_depth_pub, e_combined, e_depth),
+            ):
+                message = self.bridge.cv2_to_imgmsg(combined.astype(np.float32), encoding='32FC1')
+                message.header = source.header
+                publisher.publish(message)
+
+            h_valid_metric = h_valid & h_conf_mask_orig
+            e_valid_metric = e_valid & e_conf_mask_orig
+            if h_valid_metric.any():
+                difference = h_pred_orig_scaled[h_valid_metric] - head_dep[h_valid_metric]
+                head_depth_rmse = float(np.sqrt(np.mean(difference ** 2)))
+                head_depth_mae = float(np.mean(np.abs(difference)))
+            if e_valid_metric.any():
+                difference = e_pred_orig_scaled[e_valid_metric] - exo_dep[e_valid_metric]
+                exo_depth_rmse = float(np.sqrt(np.mean(difference ** 2)))
+                exo_depth_mae = float(np.mean(np.abs(difference)))
+            head_conf_stats = (float(np.percentile(h_conf_orig, 50)), float(np.percentile(h_conf_orig, 95)))
+            exo_conf_stats = (float(np.percentile(e_conf_orig, 50)), float(np.percentile(e_conf_orig, 95)))
+
+            h_model_conf = self._conf_mask(h_conf)
+            e_model_conf = self._conf_mask(e_conf)
+            overlap = bidirectional_overlap(
+                (h_pred_depth, e_pred_depth), (E_head, E_exo),
+                (h_intrinsic, e_intrinsic), (h_model_conf, e_model_conf),
+            )
+            self._quality_metrics['overlap'] = overlap
+            valid_tf = scale_valid and overlap >= self.min_pair_overlap
+            status = scale_status if not scale_valid else 'LOW_OVERLAP'
+
+            T_head = np.eye(4)
+            T_exo = np.eye(4)
+            T_head[:3, :] = E_head_scaled
+            T_exo[:3, :] = E_exo_scaled
+            T_exo_opt_from_head_opt = T_exo @ np.linalg.inv(T_head)
+            t_e_link_opt = self.tf_buffer.lookup_transform(
+                self.exo_frame_id, e_rgb.header.frame_id, e_rgb.header.stamp,
+                timeout=rclpy.duration.Duration(seconds=0.1),
+            )
+            T_exo_link_from_exo_opt = self.tf_to_matrix(t_e_link_opt)
+            try:
+                t_h_opt_link = self.tf_buffer.lookup_transform(
+                    h_rgb.header.frame_id, self.head_frame_id, h_rgb.header.stamp,
+                    timeout=rclpy.duration.Duration(seconds=0.1),
+                )
+            except Exception as error:
+                e_calibrated = self.camera_intrinsic(
+                    self.latest_exo_info, e_intrinsic,
+                    e_pred_depth.shape, exo_dep.shape,
+                )
+                self.publish_fused_pointcloud(
+                    head_dep, exo_dep, head_img[..., ::-1], exo_img[..., ::-1],
+                    h_pred_orig_scaled, e_pred_orig_scaled,
+                    h_fill_conf, e_fill_conf,
+                    e_calibrated, e_calibrated, np.eye(4),
+                    T_exo_link_from_exo_opt, e_rgb.header.stamp,
+                    include_head=False,
+                )
+                self._log_metrics(
+                    stamp_sec, 'TF_LOOKUP_ERROR', scale,
+                    head_depth_rmse, head_depth_mae, exo_depth_rmse,
+                    exo_depth_mae, head_conf_stats, exo_conf_stats, conf_thr,
+                )
+                self.get_logger().warn(f'Head TF lookup failed: {error}')
+                return
+            T_head_opt_from_head_link = self.tf_to_matrix(t_h_opt_link)
+            T_exo_link_from_head_link = (
+                T_exo_link_from_exo_opt @ T_exo_opt_from_head_opt @ T_head_opt_from_head_link
+            )
+            new_t = T_exo_link_from_head_link[:3, 3]
+            new_q = R.from_matrix(T_exo_link_from_head_link[:3, :3]).as_quat()
+            distance = np.linalg.norm(new_t)
+            if valid_tf and self.validate_rig_geometry and not (
+                0.2 <= distance <= 2.2 and 0.1 <= new_t[2] <= 1.5
+            ):
+                valid_tf, status = False, 'OUT_OF_BOUNDS'
+            if valid_tf and self.current_t is not None and self.max_trans_jump > 0.0:
+                if np.linalg.norm(new_t - self.current_t) > self.max_trans_jump:
+                    valid_tf, status = False, 'TRANSLATION_JUMP'
+            if valid_tf and self.current_q is not None and self.max_rot_jump > 0.0:
+                dot = np.clip(abs(np.dot(self.current_q, new_q)), 0.0, 1.0)
+                if 2.0 * np.arccos(dot) > self.max_rot_jump:
+                    valid_tf, status = False, 'ROTATION_JUMP'
+
+            h_raw_model = self.preprocess_depth_map(head_dep, h_pred_depth.shape)
+            e_raw_model = self.preprocess_depth_map(exo_dep, e_pred_depth.shape)
+            h_color = (h_tensor.permute(1, 2, 0).cpu().numpy() * 255.0).astype(np.uint8)
+            e_color = (e_tensor.permute(1, 2, 0).cpu().numpy() * 255.0).astype(np.uint8)
+            h_calibrated = self.camera_intrinsic(
+                self.latest_head_info, h_intrinsic, h_pred_depth.shape, head_dep.shape
+            )
+            e_calibrated = self.camera_intrinsic(
+                self.latest_exo_info, e_intrinsic, e_pred_depth.shape, exo_dep.shape
+            )
+            T_exo_link_from_vggt_world = T_exo_link_from_exo_opt @ T_exo
+
+            if valid_tf:
+                self.publish_vggt_pointcloud(
+                    h_raw_model, e_raw_model, h_color, e_color,
+                    h_pred_depth, e_pred_depth, h_conf, e_conf,
+                    E_head_scaled, E_exo_scaled, h_intrinsic, e_intrinsic,
+                    T_exo_link_from_vggt_world, scale, e_rgb.header.stamp,
+                )
+            self.publish_fused_pointcloud(
+                head_dep, exo_dep, head_img[..., ::-1], exo_img[..., ::-1],
+                h_pred_orig_scaled, e_pred_orig_scaled,
+                h_fill_conf, e_fill_conf,
+                h_calibrated, e_calibrated,
+                T_exo_link_from_exo_opt @ T_exo_opt_from_head_opt,
+                T_exo_link_from_exo_opt, e_rgb.header.stamp,
+                include_head=valid_tf,
+            )
+
+            if valid_tf:
+                if self.current_t is None:
+                    self.current_t, self.current_q = new_t, new_q
                 else:
-                    scale = 1.0
-                    self.get_logger().warn("No valid depth points found for scale alignment. Using scale = 1.0.")
-
-                h_pred_orig_scaled = h_pred_orig * scale
-                e_pred_orig_scaled = e_pred_orig * scale
-
-                E_head_scaled = E_head.copy()
-                E_head_scaled[:3, 3] *= scale
-                E_exo_scaled = E_exo.copy()
-                E_exo_scaled[:3, 3] *= scale
-
-                # Conf masks (per-frame) for the depth combine gate
-                h_conf_mask_h = self._conf_mask(h_conf_orig)
-                e_conf_mask_e = self._conf_mask(e_conf_orig)
-                conf_thr = self._conf_threshold(np.concatenate([h_conf_orig.ravel(), e_conf_orig.ravel()]))
-
-                h_combined = self.blend_depth(head_dep, h_pred_orig_scaled, h_valid, h_conf_mask_h)
-                e_combined = self.blend_depth(exo_dep, e_pred_orig_scaled, e_valid, e_conf_mask_e)
-
-                h_msg = self.bridge.cv2_to_imgmsg(h_combined.astype(np.float32), encoding='32FC1')
-                h_msg.header = h_depth.header
-                self.head_combined_depth_pub.publish(h_msg)
-
-                e_msg = self.bridge.cv2_to_imgmsg(e_combined.astype(np.float32), encoding='32FC1')
-                e_msg.header = e_depth.header
-                self.exo_combined_depth_pub.publish(e_msg)
-
-                # Depth estimation metrics (VGGT-scaled vs raw metric) on confident pixels
-                h_valid_metric = h_valid & h_conf_mask_h
-                e_valid_metric = e_valid & e_conf_mask_e
-                if np.sum(h_valid_metric) > 0:
-                    h_diff = h_pred_orig_scaled[h_valid_metric] - head_dep[h_valid_metric]
-                    head_depth_rmse = float(np.sqrt(np.mean(h_diff ** 2)))
-                    head_depth_mae = float(np.mean(np.abs(h_diff)))
-                if np.sum(e_valid_metric) > 0:
-                    e_diff = e_pred_orig_scaled[e_valid_metric] - exo_dep[e_valid_metric]
-                    exo_depth_rmse = float(np.sqrt(np.mean(e_diff ** 2)))
-                    exo_depth_mae = float(np.mean(np.abs(e_diff)))
-
-                if self.metrics_enabled:
-                    head_conf_stats = (
-                        float(np.percentile(h_conf_orig, 50)),
-                        float(np.percentile(h_conf_orig, 95)),
-                    )
-                    exo_conf_stats = (
-                        float(np.percentile(e_conf_orig, 50)),
-                        float(np.percentile(e_conf_orig, 95)),
-                    )
-
-                # Stage VGGT geometry. It is published after the matching
-                # camera-optical-to-link transform has been resolved.
-                h_raw_model = self.preprocess_depth_map(head_dep, h_new_h, h_crop_y)
-                e_raw_model = self.preprocess_depth_map(exo_dep, e_new_h, e_crop_y)
-                h_color = (h_tensor.permute(1, 2, 0).cpu().numpy() * 255.0).astype(np.uint8)
-                e_color = (e_tensor.permute(1, 2, 0).cpu().numpy() * 255.0).astype(np.uint8)
-                h_intrinsic = intrinsic[0, 2 * M - 2].cpu().float().numpy()
-                e_intrinsic = intrinsic[0, 2 * M - 1].cpu().float().numpy()
-
-                # Compute relative extrinsic camera pose (in optical frames)
-                T_head = np.eye(4)
-                T_head[:3, :] = E_head_scaled
-                T_exo = np.eye(4)
-                T_exo[:3, :] = E_exo_scaled
-
-                T_exo_opt_from_head_opt = T_exo @ np.linalg.inv(T_head)
-
-                try:
-                    t_h_opt_link = self.tf_buffer.lookup_transform(
-                        h_rgb.header.frame_id, self.head_frame_id,
-                        h_rgb.header.stamp,
-                        timeout=rclpy.duration.Duration(seconds=0.1)
-                    )
-                    t_e_link_opt = self.tf_buffer.lookup_transform(
-                        self.exo_frame_id, e_rgb.header.frame_id,
-                        e_rgb.header.stamp,
-                        timeout=rclpy.duration.Duration(seconds=0.1)
-                    )
-                    T_head_opt_from_head_link = self.tf_to_matrix(t_h_opt_link)
-                    T_exo_link_from_exo_opt = self.tf_to_matrix(t_e_link_opt)
-
-                    T_exo_link_from_head_link = (
-                        T_exo_link_from_exo_opt @ T_exo_opt_from_head_opt @ T_head_opt_from_head_link
-                    )
-
-                    new_t = T_exo_link_from_head_link[:3, 3]
-                    new_q = R.from_matrix(T_exo_link_from_head_link[:3, :3]).as_quat()
-
-                    T_exo_link_from_vggt_world = T_exo_link_from_exo_opt @ T_exo
-                    if not np.isfinite(T_exo_link_from_vggt_world).all():
-                        raise ValueError("VGGT world-to-exo transform contains non-finite values")
-
-                    self.publish_vggt_pointcloud(
-                        h_raw_model, e_raw_model, h_color, e_color,
-                        h_pred_depth, e_pred_depth, h_conf, e_conf,
-                        E_head_scaled, E_exo_scaled,
-                        h_intrinsic, e_intrinsic,
-                        T_exo_link_from_vggt_world,
-                        scale, e_rgb.header.stamp
-                    )
-
-                    valid_tf = True
-                    dist = np.linalg.norm(new_t)
-                    if self.validate_rig_geometry and not (0.2 <= dist <= 2.2):
-                        self.get_logger().warn(f"Rejecting transform: distance {dist:.2f} m out of bounds [0.2, 2.2]")
-                        valid_tf = False
-                        self._log_metrics(stamp_sec, 'OUT_OF_BOUNDS', scale=scale,
-                                          head_depth_rmse=head_depth_rmse, head_depth_mae=head_depth_mae,
-                                          exo_depth_rmse=exo_depth_rmse, exo_depth_mae=exo_depth_mae,
-                                          head_conf_stats=head_conf_stats, exo_conf_stats=exo_conf_stats,
-                                          conf_thr=conf_thr, new_t=new_t, new_q=new_q)
-                    elif self.validate_rig_geometry and not (0.1 <= new_t[2] <= 1.5):
-                        self.get_logger().warn(f"Rejecting transform: relative Z height {new_t[2]:.2f} m out of bounds [0.1, 1.5]")
-                        valid_tf = False
-                        self._log_metrics(stamp_sec, 'OUT_OF_BOUNDS', scale=scale,
-                                          head_depth_rmse=head_depth_rmse, head_depth_mae=head_depth_mae,
-                                          exo_depth_rmse=exo_depth_rmse, exo_depth_mae=exo_depth_mae,
-                                          head_conf_stats=head_conf_stats, exo_conf_stats=exo_conf_stats,
-                                          conf_thr=conf_thr, new_t=new_t, new_q=new_q)
-
-                    if valid_tf and self.last_solver_time is not None:
-                        trans_jump = np.linalg.norm(new_t - self.current_t)
-                        if trans_jump > self.max_trans_jump:
-                            self.get_logger().warn(f"Rejecting transform due to translation jump: {trans_jump:.3f} m > {self.max_trans_jump} m")
-                            valid_tf = False
-                            self._log_metrics(stamp_sec, 'TRANSLATION_JUMP', scale=scale,
-                                              head_depth_rmse=head_depth_rmse, head_depth_mae=head_depth_mae,
-                                              exo_depth_rmse=exo_depth_rmse, exo_depth_mae=exo_depth_mae,
-                                              head_conf_stats=head_conf_stats, exo_conf_stats=exo_conf_stats,
-                                              conf_thr=conf_thr, new_t=new_t, new_q=new_q)
-
-                    if valid_tf and self.last_solver_time is not None:
-                        dot_product = min(1.0, max(0.0, abs(np.dot(self.current_q, new_q))))
-                        rot_jump = 2.0 * np.arccos(dot_product)
-                        if rot_jump > self.max_rot_jump:
-                            self.get_logger().warn(f"Rejecting transform due to rotation jump: {rot_jump:.3f} rad > {self.max_rot_jump} rad")
-                            valid_tf = False
-                            self._log_metrics(stamp_sec, 'ROTATION_JUMP', scale=scale,
-                                              head_depth_rmse=head_depth_rmse, head_depth_mae=head_depth_mae,
-                                              exo_depth_rmse=exo_depth_rmse, exo_depth_mae=exo_depth_mae,
-                                              head_conf_stats=head_conf_stats, exo_conf_stats=exo_conf_stats,
-                                              conf_thr=conf_thr, new_t=new_t, new_q=new_q)
-
-                    if valid_tf:
-                        if self.last_solver_time is None:
-                            self.current_t = new_t
-                            self.current_q = new_q
-                        else:
-                            self.current_t = (1.0 - self.tf_filter_alpha) * self.current_t + self.tf_filter_alpha * new_t
-                            if np.dot(self.current_q, new_q) < 0:
-                                new_q = -new_q
-                            self.current_q = (1.0 - self.tf_filter_alpha) * self.current_q + self.tf_filter_alpha * new_q
-                            self.current_q /= np.linalg.norm(self.current_q)
-
-                        self.get_logger().info(
-                            f"Updated TF: t=[{self.current_t[0]:.3f}, {self.current_t[1]:.3f}, {self.current_t[2]:.3f}] "
-                            f"q=[{self.current_q[0]:.3f}, {self.current_q[1]:.3f}, {self.current_q[2]:.3f}, {self.current_q[3]:.3f}]"
-                        )
-                        self.last_solver_time = stamp_sec
-                        self._log_metrics(stamp_sec, 'SUCCESS', scale=scale,
-                                          head_depth_rmse=head_depth_rmse, head_depth_mae=head_depth_mae,
-                                          exo_depth_rmse=exo_depth_rmse, exo_depth_mae=exo_depth_mae,
-                                          head_conf_stats=head_conf_stats, exo_conf_stats=exo_conf_stats,
-                                          conf_thr=conf_thr, new_t=self.current_t, new_q=self.current_q)
-
-                except Exception as e:
-                    self.get_logger().warn(f"TF Lookup failed: {str(e)}")
-                    self._log_metrics(stamp_sec, 'TF_LOOKUP_ERROR', scale=scale,
-                                      head_depth_rmse=head_depth_rmse, head_depth_mae=head_depth_mae,
-                                      exo_depth_rmse=exo_depth_rmse, exo_depth_mae=exo_depth_mae,
-                                      head_conf_stats=head_conf_stats, exo_conf_stats=exo_conf_stats,
-                                      conf_thr=conf_thr)
-
-            except Exception as e:
-                self.get_logger().error(f"VGGT extrinsic solver callback failed: {str(e)}")
-                self.image_buffer.clear()
-                self.dino_feature_buffer.clear()
-                if isinstance(e, torch.cuda.OutOfMemoryError):
-                    torch.cuda.empty_cache()
-                self._log_metrics(stamp_sec, 'SOLVER_ERROR', scale=scale,
-                                  head_depth_rmse=head_depth_rmse, head_depth_mae=head_depth_mae,
-                                  exo_depth_rmse=exo_depth_rmse, exo_depth_mae=exo_depth_mae,
-                                  head_conf_stats=head_conf_stats, exo_conf_stats=exo_conf_stats,
-                                  conf_thr=conf_thr)
-
-        # Always broadcast the last known good transforms to keep TF tree active
-        if self.current_t is not None:
-            self.broadcast_transform(e_rgb.header.stamp)
+                    self.current_t = (1.0 - self.tf_filter_alpha) * self.current_t + self.tf_filter_alpha * new_t
+                    if np.dot(self.current_q, new_q) < 0.0:
+                        new_q = -new_q
+                    self.current_q = (1.0 - self.tf_filter_alpha) * self.current_q + self.tf_filter_alpha * new_q
+                    self.current_q /= np.linalg.norm(self.current_q)
+                self.broadcast_transform(e_rgb.header.stamp)
+                status = 'SUCCESS'
+            self._log_metrics(
+                stamp_sec, status, scale, head_depth_rmse, head_depth_mae,
+                exo_depth_rmse, exo_depth_mae, head_conf_stats, exo_conf_stats,
+                conf_thr, new_t, new_q,
+            )
+        except Exception as error:
+            self.get_logger().error(f"VGGT extrinsic solver callback failed: {error}")
+            self.image_buffer.clear()
+            self.dino_feature_buffer.clear()
+            if isinstance(error, torch.cuda.OutOfMemoryError):
+                torch.cuda.empty_cache()
+            self._log_metrics(
+                stamp_sec, 'SOLVER_ERROR', scale, head_depth_rmse, head_depth_mae,
+                exo_depth_rmse, exo_depth_mae, head_conf_stats, exo_conf_stats,
+                conf_thr,
+            )
 
     def publish_vggt_pointcloud(self, h_raw_depth, e_raw_depth, h_color, e_color,
                                 h_pred_depth, e_pred_depth, h_conf, e_conf,
@@ -561,8 +601,18 @@ class ExtrinsicSolverNode(Node):
         h_raw_valid = (h_raw_depth > 0.1) & (h_raw_depth < 10.0) & np.isfinite(h_raw_depth)
         e_raw_valid = (e_raw_depth > 0.1) & (e_raw_depth < 10.0) & np.isfinite(e_raw_depth)
 
-        h_valid = (h_depth_scaled > 0.1) & (h_depth_scaled < 6.0)
-        e_valid = (e_depth_scaled > 0.1) & (e_depth_scaled < 6.0)
+        h_valid = (
+            (h_depth_scaled > self.fused_cloud_min_depth)
+            & (h_depth_scaled < self.fused_cloud_max_depth)
+            & ~depth_edge_mask(h_depth_scaled, self.depth_edge_rtol)
+            & ~np.isnan(h_raw_depth)
+        )
+        e_valid = (
+            (e_depth_scaled > self.fused_cloud_min_depth)
+            & (e_depth_scaled < self.fused_cloud_max_depth)
+            & ~depth_edge_mask(e_depth_scaled, self.depth_edge_rtol)
+            & ~np.isnan(e_raw_depth)
+        )
 
         if self.pcl_require_raw_support:
             h_valid = h_valid & h_raw_valid
@@ -572,9 +622,12 @@ class ExtrinsicSolverNode(Node):
             h_valid = h_valid & h_conf_mask
             e_valid = e_valid & e_conf_mask
 
-        if self.pcl_max_depth_residual > 0.0:
-            h_valid = h_valid & (~h_raw_valid | (np.abs(h_depth_scaled - h_raw_depth) <= self.pcl_max_depth_residual))
-            e_valid = e_valid & (~e_raw_valid | (np.abs(e_depth_scaled - e_raw_depth) <= self.pcl_max_depth_residual))
+        h_valid &= ~h_raw_valid | (
+            np.abs(h_depth_scaled - h_raw_depth) <= 0.05 + 0.05 * h_raw_depth
+        )
+        e_valid &= ~e_raw_valid | (
+            np.abs(e_depth_scaled - e_raw_depth) <= 0.05 + 0.05 * e_raw_depth
+        )
 
         h_pts = unproject_depth_np(h_depth_scaled, h_extrinsic, h_intrinsic)
         e_pts = unproject_depth_np(e_depth_scaled, e_extrinsic, e_intrinsic)
@@ -598,42 +651,82 @@ class ExtrinsicSolverNode(Node):
         all_pts = all_pts[::downsample_factor]
         all_color = all_color[::downsample_factor]
 
-        num_points = len(all_pts)
-        if num_points == 0:
+        if len(all_pts) == 0:
             return
+        self.vggt_pcl_pub.publish(
+            self.pointcloud_message(all_pts, all_color, self.exo_frame_id, stamp)
+        )
+        self.get_logger().info(
+            f"Published VGGT point cloud in {self.exo_frame_id}: {len(all_pts)} points"
+        )
 
-        data = np.zeros(num_points, dtype=[
-            ('x', np.float32), ('y', np.float32), ('z', np.float32),
-            ('rgb', np.uint32)
-        ])
-        data['x'] = all_pts[:, 0]
-        data['y'] = all_pts[:, 1]
-        data['z'] = all_pts[:, 2]
+    def publish_fused_pointcloud(
+        self, head_depth, exo_depth, head_color, exo_color,
+        head_prediction, exo_prediction, head_confident, exo_confident,
+        head_intrinsic, exo_intrinsic, exo_from_head_optical,
+        exo_from_exo_optical, stamp, include_head,
+    ):
+        """Publish sensor-first local geometry; predictions fill ordinary holes."""
+        if not self.publish_fused_cloud:
+            return
+        groups = []
+        sensor_count = fill_count = 0
+        cameras = [(
+            exo_depth, exo_prediction, exo_confident, exo_color,
+            exo_intrinsic, exo_from_exo_optical,
+        )]
+        if include_head:
+            cameras.insert(0, (
+                head_depth, head_prediction, head_confident, head_color,
+                head_intrinsic, exo_from_head_optical,
+            ))
 
-        rgb_packed = (all_color[:, 0].astype(np.uint32) << 16) | \
-                     (all_color[:, 1].astype(np.uint32) << 8) | \
-                     (all_color[:, 2].astype(np.uint32))
-        data['rgb'] = rgb_packed
+        sensor_groups = []
+        fill_groups = []
+        for raw, prediction, confident, color, intrinsic, transform in cameras:
+            sensor_valid = (
+                np.isfinite(raw) & (raw >= self.fused_cloud_min_depth)
+                & (raw <= self.fused_cloud_max_depth)
+                & ~depth_edge_mask(raw, self.depth_edge_rtol)
+            )
+            fill_valid = (
+                np.isfinite(raw) & (raw == 0.0) & confident
+                & np.isfinite(prediction)
+                & (prediction >= self.fused_cloud_min_depth)
+                & (prediction <= self.fused_cloud_max_depth)
+                & ~depth_edge_mask(prediction, self.depth_edge_rtol)
+            )
+            for valid, depth, destination in (
+                (sensor_valid, raw, sensor_groups),
+                (fill_valid, prediction, fill_groups),
+            ):
+                if not valid.any():
+                    continue
+                points = camera_points_from_depth(depth, intrinsic)[valid]
+                destination.append((transform_points(points, transform), color[valid]))
+            sensor_count += int(sensor_valid.sum())
+            fill_count += int(fill_valid.sum())
 
-        pcl_msg = PointCloud2()
-        pcl_msg.header.frame_id = self.exo_frame_id
-        pcl_msg.header.stamp = stamp
-        pcl_msg.height = 1
-        pcl_msg.width = num_points
-        pcl_msg.is_dense = False
-        pcl_msg.is_bigendian = False
-        pcl_msg.fields = [
-            PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
-            PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
-            PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
-            PointField(name='rgb', offset=12, datatype=PointField.UINT32, count=1),
-        ]
-        pcl_msg.point_step = 16
-        pcl_msg.row_step = pcl_msg.point_step * num_points
-        pcl_msg.data = data.tobytes()
-
-        self.vggt_pcl_pub.publish(pcl_msg)
-        self.get_logger().info(f"Published VGGT point cloud in {self.exo_frame_id}: {num_points} points")
+        groups = sensor_groups + fill_groups
+        if not groups:
+            return
+        points = np.vstack([group[0] for group in groups])
+        colors = np.vstack([group[1] for group in groups])
+        finite = np.isfinite(points).all(axis=1)
+        points, colors = points[finite], colors[finite]
+        points, colors = voxel_keep_first(
+            points, colors, self.fused_cloud_voxel_size
+        )
+        if not len(points):
+            return
+        self.fused_pcl_pub.publish(
+            self.pointcloud_message(points, colors, self.exo_frame_id, stamp)
+        )
+        self._quality_metrics.update({
+            'fused_sensor_points': sensor_count,
+            'fused_fill_points': fill_count,
+            'fused_head_included': int(include_head),
+        })
 
     def broadcast_transform(self, stamp):
         if self.current_t is None or self.current_q is None:
@@ -728,6 +821,9 @@ class ExtrinsicSolverNode(Node):
         )
         header = [
             'timestamp', 'status', 'scale',
+            'head_scale', 'exo_scale', 'head_scale_support', 'exo_scale_support',
+            'overlap', 'tf_fresh', 'fused_sensor_points', 'fused_fill_points',
+            'fused_head_included',
             'head_depth_rmse', 'head_depth_mae', 'exo_depth_rmse', 'exo_depth_mae',
             'head_conf_p50', 'head_conf_p95', 'exo_conf_p50', 'exo_conf_p95', 'conf_thr',
             't_x', 't_y', 't_z', 'gt_t_x', 'gt_t_y', 'gt_t_z', 'error_t', 'error_r_deg',
@@ -740,6 +836,15 @@ class ExtrinsicSolverNode(Node):
                     writer.writerow(header)
                 writer.writerow([
                     stamp_sec, status, scale,
+                    self._quality_metrics.get('head_scale'),
+                    self._quality_metrics.get('exo_scale'),
+                    self._quality_metrics.get('head_scale_support'),
+                    self._quality_metrics.get('exo_scale_support'),
+                    self._quality_metrics.get('overlap'),
+                    int(status == 'SUCCESS'),
+                    self._quality_metrics.get('fused_sensor_points'),
+                    self._quality_metrics.get('fused_fill_points'),
+                    self._quality_metrics.get('fused_head_included'),
                     head_depth_rmse, head_depth_mae, exo_depth_rmse, exo_depth_mae,
                     h_conf_p50, h_conf_p95, e_conf_p50, e_conf_p95, conf_thr,
                     t_x, t_y, t_z, gt_t_x, gt_t_y, gt_t_z, error_t, error_r_deg,

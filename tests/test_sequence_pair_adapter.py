@@ -1,7 +1,12 @@
 from builtin_interfaces.msg import Time
 from sensor_msgs.msg import CameraInfo, Image
 
-from exo_head_slam.sequence_pair_adapter_node import retag_frame, sliding_pair
+from exo_head_slam.sequence_pair_adapter_node import (
+    pair_is_contiguous,
+    retag_frame,
+    sliding_pair,
+    stamp_seconds,
+)
 
 
 def test_sliding_pairs_overlap_and_retag_without_mutating_inputs():
@@ -24,3 +29,8 @@ def test_sliding_pairs_overlap_and_retag_without_mutating_inputs():
     assert all(message.header.frame_id == 'head_camera_color_optical_frame'
                for message in tagged)
     assert all(message.header.frame_id == '' for message in pair[0])
+    assert stamp_seconds(Time(sec=12, nanosec=500_000_000)) == 12.5
+    assert pair_is_contiguous(None, 10.0, 0.5)
+    assert pair_is_contiguous(10.0, 10.1, 0.5)
+    assert not pair_is_contiguous(10.0, 11.0, 0.5)
+    assert not pair_is_contiguous(10.0, 9.0, 0.5)

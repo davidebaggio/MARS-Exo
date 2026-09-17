@@ -1,3 +1,7 @@
+sequence_pair_adapter:
+  ros__parameters:
+    max_pair_interval: 0.5 # never couple images across recording/dropout gaps
+
 semantic_masker:
   ros__parameters:
     head.input_rgb_topic: "/camera/head/color/image_raw"
@@ -13,6 +17,7 @@ semantic_masker:
     exo.conf_threshold: 0.20
     exo.dynamic_classes: [0, 1, 2, 3, 5, 7]
     masker.model_path: "yolov8n-seg.pt"
+    mask_dilation_px: 5
     sync_slop: 0.035
 
 extrinsic_solver:
@@ -21,19 +26,32 @@ extrinsic_solver:
     head_depth_topic: "/head/masked/depth_raw"
     exo_rgb_topic: "/exo/masked/image_raw"
     exo_depth_topic: "/exo/masked/depth_raw"
+    head_camera_info_topic: "/camera/head/color/camera_info"
+    exo_camera_info_topic: "/camera/exo/color/camera_info"
     head_frame_id: "head_link"
     exo_frame_id: "exo_link"
-    tf_filter_alpha: 0.5
+    tf_filter_alpha: 1.0
     sliding_window_size: 4
+    max_trans_jump: 0.0 # overlap/scale gates replace lag-prone per-frame jump rejection
+    max_rot_jump: 0.0
     validate_rig_geometry: true # fixed head/exo baseline and relative-height bounds
     # VGGT depth-head confidence gating
     depth_conf_mode: "percentile" # "percentile" | "absolute"
-    depth_conf_percentile: 25.0 # drop bottom N% of pixels by conf when mode=percentile
+    depth_conf_percentile: 20.0 # official VGGT-Omega visualizer default
     depth_conf_absolute: 1.5 # conf threshold when mode=absolute (range is (1, +inf))
     conf_gate_combine: true # gate raw+VGGT depth fill by conf mask
     conf_filter_pointcloud: true # percentile-filter /vggt/combined_pointcloud
     pcl_require_raw_support: false # keep VGGT cloud dense; raw depth only rejects bad pixels
-    pcl_max_depth_residual: 0.25 # drop raw pixels where scaled VGGT depth disagrees by > meters
+    pcl_max_depth_residual: 0.0 # use relative residual parameters below
+    depth_edge_rtol: 0.03
+    min_pair_overlap: 0.15
+    scale_min_support: 1000
+    scale_max_camera_disagreement: 0.15
+    publish_fused_cloud: false # excluded from final evaluation; avoids expensive voxelization
+    fused_cloud_topic: "/vggt/fused_local_pointcloud"
+    fused_cloud_min_depth: 0.15
+    fused_cloud_max_depth: 10.0
+    fused_cloud_voxel_size: 0.02
     # Metrics
     metrics_enabled: true
     metrics_csv_path: "extrinsic_metrics.csv"

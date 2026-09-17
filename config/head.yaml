@@ -4,8 +4,11 @@ head_depth_preprocessor:
     output_depth_topic: "/head/filtered/depth_raw"
     depth_filter.enabled: true
     depth_filter.depth_unit_scale: 0.001
+    depth_filter.min_depth: 0.1
+    depth_filter.max_depth: 10.0
+    depth_filter.spatial.enabled: false
     depth_filter.spatial.kernel_size: 5
     depth_filter.spatial.sigma_color: 0.08
     depth_filter.spatial.sigma_space: 3.0
-    depth_filter.temporal.enabled: true
+    depth_filter.temporal.enabled: false
     depth_filter.temporal.alpha: 0.6
