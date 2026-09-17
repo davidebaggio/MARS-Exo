@@ -58,6 +58,7 @@ cloud_map_evaluator:
     estimated_cloud_topic: "/lightglue/combined_pointcloud"
     ground_truth_cloud_topic: "/ground_truth/visible_cloud"
     ground_truth_odom_topic: "/exoskeleton/odom"
+    ground_truth_is_exo_pose: false
     voxel_size: 0.05
     fscore_threshold: 0.1
     waist_to_exo_translation: [0.07, 0.0, 0.0]

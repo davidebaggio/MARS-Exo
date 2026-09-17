@@ -331,10 +331,18 @@ class BenchmarkEvaluatorNode(Node):
         self.declare_parameter('ground_truth_odom_topic', '/exoskeleton/odom')
         self.declare_parameter('require_ground_truth_map', True)
         self.declare_parameter('ground_truth_is_camera_pose', False)
+        self.declare_parameter('ground_truth_is_exo_pose', False)
+        self.declare_parameter('publish_ground_truth_tf', False)
         self.output_prefix = self.get_parameter('output_prefix').value
         self.map_start_z = float(self.get_parameter('map_start_z').value)
         self.require_ground_truth_map = bool(
             self.get_parameter('require_ground_truth_map').value
+        )
+        self.publish_ground_truth_tf = bool(
+            self.get_parameter('publish_ground_truth_tf').value
+        )
+        self.ground_truth_is_exo_pose = bool(
+            self.get_parameter('ground_truth_is_exo_pose').value
         )
 
         self.estimated_trajectory = []
@@ -348,7 +356,9 @@ class BenchmarkEvaluatorNode(Node):
                 degrees=True,
             ).as_quat(),
         )
-        if self.get_parameter('ground_truth_is_camera_pose').value:
+        if self.ground_truth_is_exo_pose:
+            self.waist_from_camera = np.eye(4)
+        elif self.get_parameter('ground_truth_is_camera_pose').value:
             self.waist_from_camera = np.linalg.inv(_transform(
                 [0.0, 0.0, 0.0], [0.5, -0.5, 0.5, -0.5]
             ))
@@ -459,7 +469,8 @@ class BenchmarkEvaluatorNode(Node):
     def _gt_static(self, message):
         for transform in message.transforms:
             if (
-                transform.header.frame_id == 'waist_link'
+                not self.ground_truth_is_exo_pose
+                and transform.header.frame_id == 'waist_link'
                 and transform.child_frame_id == 'front_camera_link'
             ):
                 value = transform.transform
@@ -473,14 +484,16 @@ class BenchmarkEvaluatorNode(Node):
                     ]),
                 )
                 self._publish_visualization_tf()
-        self.static_broadcaster.sendTransform([
-            self._prefixed_gt_transform(transform) for transform in message.transforms
-        ])
+        if self.publish_ground_truth_tf:
+            self.static_broadcaster.sendTransform([
+                self._prefixed_gt_transform(transform) for transform in message.transforms
+            ])
 
     def _gt_dynamic(self, message):
-        self.gt_tf_broadcaster.sendTransform([
-            self._prefixed_gt_transform(transform) for transform in message.transforms
-        ])
+        if self.publish_ground_truth_tf:
+            self.gt_tf_broadcaster.sendTransform([
+                self._prefixed_gt_transform(transform) for transform in message.transforms
+            ])
 
     def _estimated_tf(self, message):
         for transform in message.transforms:

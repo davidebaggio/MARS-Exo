@@ -42,3 +42,7 @@ match `vggt-omega` exactly.
 
 Cloud inputs are recorded during online processing, then evaluated offline so
 KD-tree work does not alter solver timing.
+
+Exoskeleton `/tf` and `/tf_static` are remapped to evaluation-only topics. A
+small adapter composes dynamic exo-to-head GT and world-to-exo odometry without
+publishing recorded robot joints into RViz or supplying camera pitch to LightGlue.

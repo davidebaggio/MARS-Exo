@@ -25,8 +25,11 @@ def _launch_evaluation(context):
     global_mode = LaunchConfiguration('global')
     config = PathJoinSubstitution([FindPackageShare('exo_head_slam'), 'config', 'common.yaml'])
     metadata = rosbag2_py.Info().read_metadata(bag_path, 'mcap')
+    ground_truth_is_exo_pose = metadata.custom_data.get(
+        'ground_truth_is_exo_pose', 'false'
+    ).lower() == 'true'
     exo_pitch_deg = metadata.custom_data.get('exo_pitch_deg')
-    if exo_pitch_deg is None:
+    if exo_pitch_deg is None and not ground_truth_is_exo_pose:
         match = re.fullmatch(
             r'metrics_(-?\d+(?:\.\d+)?)_(-?\d+(?:\.\d+)?)_'
             r'(-?\d+(?:\.\d+)?)_(\d+)_cloud_bag',
@@ -34,12 +37,13 @@ def _launch_evaluation(context):
         )
         if match:
             exo_pitch_deg = match.group(2)
-    if exo_pitch_deg is None:
+    if exo_pitch_deg is None and not ground_truth_is_exo_pose:
         exo_pitch_deg = LaunchConfiguration('exo_pitch_deg').perform(context)
-    if not exo_pitch_deg:
+    if not exo_pitch_deg and not ground_truth_is_exo_pose:
         raise RuntimeError(
             'Evaluation bag has no exo_pitch_deg metadata; pass exo_pitch_deg for old bags.'
         )
+    exo_pitch_deg = float(exo_pitch_deg or 0.0)
 
     ground_truth_odom_topic = metadata.custom_data.get(
         'ground_truth_odom_topic', '/exoskeleton/odom'
@@ -60,10 +64,11 @@ def _launch_evaluation(context):
         parameters=[config, {
             'use_sim_time': True,
             'metrics_csv_path': metrics_csv_path,
-            'waist_to_exo_pitch_deg': float(exo_pitch_deg),
+            'waist_to_exo_pitch_deg': exo_pitch_deg,
             'ground_truth_odom_topic': ground_truth_odom_topic,
             'ground_truth_cloud_is_local': ground_truth_cloud_is_local,
             'ground_truth_is_camera_pose': ground_truth_is_camera_pose,
+            'ground_truth_is_exo_pose': ground_truth_is_exo_pose,
             'global': global_mode,
         }],
     )

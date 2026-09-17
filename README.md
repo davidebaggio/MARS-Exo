@@ -55,7 +55,7 @@ Required ROS packages:
 Playback is one-shot unless `--loop` is passed. Supported ROS 2 datasets:
 
 - native dual-camera recordings under `data/rosbag2_*`;
-- exoskeleton ground-truth datasets under `data/exoskeleton_dataset_*`;
+- exoskeleton ground-truth datasets under `data/`, including moving cameras;
 - converted TUM bags under `data/TUM/*_cloud.bag`.
 
 TUM inputs are converted with:
@@ -110,6 +110,7 @@ Raw recordings without ground truth still produce solver/runtime metrics.
 | `depth_preprocessor` | Normalize/filter metric depth |
 | `semantic_masker` | Batched dual-camera YOLO masking |
 | `sequence_pair_adapter` | Convert single-camera sequences into adjacent pairs |
+| `ground_truth_adapter` | Compose timestamped camera GT for evaluation only |
 | `extrinsic_solver` | LightGlue matching, RANSAC, TF and combined cloud |
 | `benchmark_evaluator` | RTAB trajectory/map evaluation |
 | `cloud_map_evaluator` | Offline visible-cloud evaluation |
@@ -121,6 +122,11 @@ Important topics:
 - `/exo_rtabmap/cloud_map`
 - `/ground_truth/visible_cloud`
 - `/ground_truth/visible_map`
+
+For exoskeleton bags, recorded `/tf` and `/tf_static` are isolated from the
+live TF tree. Camera pitch is never inferred from filenames; LightGlue predicts
+online, while bag transforms provide evaluation GT only. Robot joints are not
+republished in RViz.
 
 Runtime parameters live in `config/head.yaml`, `config/exo.yaml`, and
 `config/common.yaml`.

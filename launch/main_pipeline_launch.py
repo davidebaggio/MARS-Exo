@@ -44,11 +44,6 @@ def generate_launch_description():
     gt_tf_topic_arg = DeclareLaunchArgument('gt_tf_topic', default_value='')
     gt_tf_topic = LaunchConfiguration('gt_tf_topic')
 
-    exo_pitch_deg_arg = DeclareLaunchArgument('exo_pitch_deg', default_value='0')
-    exo_pitch_deg = LaunchConfiguration('exo_pitch_deg')
-    head_pitch_deg_arg = DeclareLaunchArgument('head_pitch_deg', default_value='0')
-    head_pitch_deg = LaunchConfiguration('head_pitch_deg')
-
     use_imu_arg = DeclareLaunchArgument(
         'use_imu',
         default_value='false',
@@ -113,6 +108,14 @@ def generate_launch_description():
         name='sequence_pair_adapter',
         parameters=[common_config, common_params],
         condition=IfCondition(coupled_sequence_dataset),
+    )
+
+    ground_truth_adapter = Node(
+        package='exo_head_slam',
+        executable='ground_truth_adapter',
+        name='ground_truth_adapter',
+        parameters=[common_params],
+        condition=IfCondition(exoskeleton_dataset),
     )
 
     head_depth_preprocessor = Node(
@@ -223,8 +226,6 @@ def generate_launch_description():
         gt_parent_frame_arg,
         gt_child_frame_arg,
         gt_tf_topic_arg,
-        exo_pitch_deg_arg,
-        head_pitch_deg_arg,
         use_imu_arg,
         imu_topic_arg,
         filtered_imu_topic_arg,
@@ -259,24 +260,6 @@ def generate_launch_description():
             ),
         ))
 
-    for name, child, translation, pitch_deg in (
-        ('gt_exo_tf', 'gt_exo_link', ('0.07', '0', '0'), exo_pitch_deg),
-        ('gt_head_tf', 'gt_head_link', ('0.07', '0', '0.75'), head_pitch_deg),
-    ):
-        actions.append(Node(
-            package='tf2_ros',
-            executable='static_transform_publisher',
-            name=name,
-            arguments=[
-                '--x', translation[0], '--y', translation[1], '--z', translation[2],
-                '--roll', '0',
-                '--pitch', PythonExpression([pitch_deg, ' * 0.017453292519943295']),
-                '--yaw', '0',
-                '--frame-id', 'gt_waist_link', '--child-frame-id', child,
-            ],
-            condition=IfCondition(exoskeleton_dataset),
-        ))
-
     try:
         for required_package in ('rtabmap_slam', 'rtabmap_odom', 'rtabmap_util'):
             get_package_share_directory(required_package)
@@ -303,16 +286,17 @@ def generate_launch_description():
                 'use_sim_time': use_sim_time,
                 'output_prefix': benchmark_output_prefix,
                 'map_start_z': ParameterValue(map_start_z, value_type=float),
-                'waist_to_exo_pitch_deg': ParameterValue(
-                    exo_pitch_deg, value_type=float
-                ),
                 'ground_truth_odom_topic': PythonExpression([
                     "'/ground_truth/odom' if '", tum_ground_truth,
-                    "'.lower() == 'true' else '/exoskeleton/odom'",
+                    "'.lower() == 'true' else '/ground_truth/exo_odom'",
                 ]),
                 'ground_truth_is_camera_pose': ParameterValue(
                     tum_ground_truth, value_type=bool
                 ),
+                'ground_truth_is_exo_pose': ParameterValue(
+                    exoskeleton_dataset, value_type=bool
+                ),
+                'publish_ground_truth_tf': False,
                 'require_ground_truth_map': ParameterValue(
                     PythonExpression([
                         "'", tum_ground_truth, "'.lower() != 'true'"
@@ -331,6 +315,7 @@ def generate_launch_description():
 
     actions.extend([
         sequence_pair_adapter,
+        ground_truth_adapter,
         head_depth_preprocessor,
         exo_depth_preprocessor,
         semantic_masker,

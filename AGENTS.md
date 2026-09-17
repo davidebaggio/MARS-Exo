@@ -33,6 +33,7 @@ converted TUM RGB-D bags under `data/`. Playback is one-shot by default.
 | `depth_preprocessor` | Metric depth normalization/filtering |
 | `semantic_masker` | Batched YOLO dynamic-object masking |
 | `sequence_pair_adapter` | Adjacent-frame TUM pairing |
+| `ground_truth_adapter` | Evaluation-only dynamic camera GT composition |
 | `extrinsic_solver` | LightGlue matching, RANSAC, TF, combined cloud |
 | `pointcloud_publisher` | Optional debug clouds |
 | `benchmark_evaluator` | RTAB trajectory/map metrics |
@@ -56,6 +57,9 @@ head/exo RGB-D -> preprocessing -> semantic masking -> LightGlue/RANSAC
 exo raw RGB + filtered depth -> RTAB odometry/map
 GT bags -> extrinsic, cloud, trajectory, and map evaluators
 ```
+
+Exoskeleton bag TF stays isolated from the live tree. The adapter composes
+timestamped camera GT and exo-camera odometry; filenames never supply pitch.
 
 ## Gotchas
 
