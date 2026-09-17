@@ -151,8 +151,8 @@ class SemanticMaskerNode(Node):
         
         sync_slop = self.get_parameter('sync_slop').value
         self.ts = message_filters.ApproximateTimeSynchronizer(
-            # Using queue_size=2 to avoid backlog buildup and lag
-            self.subscribers, queue_size=2, slop=sync_slop
+            # Retain RGB while delayed simulated depth reaches the synchronizer.
+            self.subscribers, queue_size=30, slop=sync_slop
         )
         self.ts.registerCallback(self.callback)
         
