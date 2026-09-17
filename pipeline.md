@@ -119,7 +119,8 @@ Scale alignment uses a per-frame median ratio between raw metric depth and VGGT 
 * Two semantic masking nodes.
 * One extrinsic solver node (VGGT-based).
 * Two pointcloud publisher nodes (debug pcl for Head + Exo, behind `publish_debug_pcl`).
-* Static TF publishers for `exo_link -> exo_camera_link` and `head_link -> head_camera_link`.
+* Static optical-axis TF publishers for the live `exo_link` and `head_link` camera frames.
+* Recorded camera TF is isolated from the live tree and composed per timestamp for evaluation only; no camera pitch is assumed.
 * Conditionally includes `launch/rtabmap_agents_launch.py` (only if `rtabmap_slam` and `rtabmap_odom` are found) — RGB-D odometry plus RTAB-Map on the exo camera.
 
 ## Runtime Assumptions

@@ -27,6 +27,7 @@ After `colcon build`, the generated shim scripts in `install/exo_head_slam/lib/e
 | `pointcloud_publisher` | `pointcloud_publisher_node.py` | Debug per-camera XYZRGB PointCloud2 from RGB-D (behind `publish_debug_pcl` flag) |
 | `cloud_map_evaluator` | `cloud_map_evaluator_node.py` | Offline VGGT evaluation against `/ground_truth/visible_cloud` |
 | `benchmark_evaluator` | `benchmark_evaluator_node.py` | Final RTAB trajectory/map comparison with SE(3) and Sim(3) reports |
+| `ground_truth_adapter` | `ground_truth_adapter_node.py` | Evaluation-only composition of dynamic camera GT from bag TF |
 
 ## Launch
 
@@ -56,7 +57,7 @@ Head RGB + depth → depth_preprocessor → semantic_masker ─┐
                                                           ├─ extrinsic_solver (VGGT-1B) → TF exo_link→head_link, vggt_world
 Exo RGB + depth  → depth_preprocessor → semantic_masker ─┘                                  ↘ combined depth fills, /vggt/combined_pointcloud
 
-/vggt/combined_pointcloud + /exoskeleton/odom → evaluation bag ← /ground_truth/visible_cloud
+/vggt/combined_pointcloud + /ground_truth/exo_odom → evaluation bag ← /ground_truth/visible_cloud
 evaluation bag → offline cloud_map_evaluator → cloud metrics CSV
 
 RTAB-Map + rgbd_odometry (exo) → static TF map→odom + dynamic TF odom→exo_link → exo_rtabmap/cloud_map + /map (optional)
@@ -72,6 +73,6 @@ VGGT depth-head confidence (`depth_conf`, range `(1, +inf)`) gates:
 - `model.depth_head(...)` returns `(depth_map, depth_conf)`; the project does NOT use `model.point_head`.
 - `build/`, `install/`, `log/` are colcon artifacts, gitignored
 - `*.pt` and `*.engine` model files are gitignored — `yolov8n-seg.pt` must be placed in repo root manually
-- Bag playback defaults to the configured `DEFAULT_BAG` in `run.sh`, played once at 0.3x; use `--rate`, `--imu`, `--debug-pcl`, or `--loop` to override runtime behavior
-- Exoskeleton bag suffix `x_y_z` means bag order, exo-camera pitch (degrees), head-camera pitch (degrees); `run.sh` parses the pitches for GT evaluation.
+- Bag playback defaults to the configured `DEFAULT_BAG` in `run.sh`, played once at 0.2x; use `--rate`, `--imu`, `--debug-pcl`, or `--loop` to override runtime behavior
+- Exoskeleton camera pitches may change and are never inferred from filenames. Recorded `/tf` and `/tf_static` are isolated and used only to compose timestamped evaluation GT.
 - RGB and depth must already be published and aligned by an upstream camera stack; this package does not capture or align them

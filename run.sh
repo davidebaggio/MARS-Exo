@@ -110,8 +110,6 @@ EXOSKELETON_DATASET=false
 COUPLED_SEQUENCE_DATASET=false
 TUM_GROUND_TRUTH=false
 GT_LAUNCH_ARGS=()
-EXO_PITCH_DEG=0
-HEAD_PITCH_DEG=0
 CLOUD_RECORD_PID=""
 CLOUD_EVAL_BAG=""
 CLOUD_METRICS_CSV=""
@@ -153,27 +151,19 @@ if [[ -z "$SLIDING_WINDOW_SIZE" ]]; then
 	echo "sliding_window_size not found in config/common.yaml" >&2
 	exit 1
 fi
-if [[ "$BAG_NAME" =~ _(-?[0-9]+([.][0-9]+)?)_(-?[0-9]+([.][0-9]+)?)_(-?[0-9]+([.][0-9]+)?)$ ]]; then
-	DATASET_NUMBERS="${BASH_REMATCH[1]}_${BASH_REMATCH[3]}_${BASH_REMATCH[5]}"
-	DATASET_EXO_PITCH="${BASH_REMATCH[3]}"
-	DATASET_HEAD_PITCH="${BASH_REMATCH[5]}"
-else
-	DATASET_NUMBERS="$BAG_NAME"
-	DATASET_EXO_PITCH=""
-	DATASET_HEAD_PITCH=""
-fi
-RUN_ID="${DATASET_NUMBERS}_${SLIDING_WINDOW_SIZE}"
+RUN_ID="${BAG_NAME}_${SLIDING_WINDOW_SIZE}"
 BENCHMARK_OUTPUT_PREFIX="${EVAL_DIR}/benchmark_${RUN_ID}"
 
 if grep -q 'Topic: /exoskeleton/odom | Type: nav_msgs/msg/Odometry' <<<"$BAG_INFO"; then
 	EXOSKELETON_DATASET=true
-	GT_LAUNCH_ARGS=(gt_parent_frame:=gt_exo_link gt_child_frame:=gt_head_link)
-	if [[ -n "$DATASET_EXO_PITCH" ]]; then
-		EXO_PITCH_DEG="$DATASET_EXO_PITCH"
-		HEAD_PITCH_DEG="$DATASET_HEAD_PITCH"
-	else
-		echo "Warning: cannot parse camera pitches from $BAG_NAME; using 0/0 degrees." >&2
-	fi
+	for required_topic in /tf /tf_static; do
+		if ! grep -q "Topic: $required_topic | Type: tf2_msgs/msg/TFMessage" <<<"$BAG_INFO"; then
+			echo "Exoskeleton bag missing camera ground-truth topic: $required_topic" >&2
+			exit 1
+		fi
+	done
+	GT_LAUNCH_ARGS=(gt_parent_frame:=gt_exo_link gt_child_frame:=gt_head_link \
+		gt_tf_topic:=/ground_truth/pair_tf)
 fi
 if [[ ! -f vggt-omega/vggt_omega/models/vggt_omega.py ]]; then
 	echo "VGGT-Omega submodule is not initialized. Run: git submodule update --init --recursive" >&2
@@ -230,27 +220,27 @@ cleanup() {
 	fi
 	# ros2 launch may orphan children after interruption. Scope cleanup to the
 	# exact node names owned by this pipeline, never unrelated ROS processes.
-	for node in exo_color_tf exo_imu_tf head_color_tf gt_exo_tf gt_head_tf \
+	for node in exo_color_tf exo_imu_tf head_color_tf \
 		viz_ground_to_map_tf exo_rgbd_odometry exo_rtabmap map_assembler \
 		benchmark_evaluator depth_preprocessor exo_depth_preprocessor \
 		head_depth_preprocessor semantic_masker extrinsic_solver \
-		exo_pcl_publisher exo_imu_filter sequence_pair_adapter; do
+		exo_pcl_publisher exo_imu_filter sequence_pair_adapter ground_truth_adapter; do
 		pkill -INT -f "__node:=${node}( |$)" 2>/dev/null || true
 	done
 	sleep 1
-	for node in exo_color_tf exo_imu_tf head_color_tf gt_exo_tf gt_head_tf \
+	for node in exo_color_tf exo_imu_tf head_color_tf \
 		viz_ground_to_map_tf exo_rgbd_odometry exo_rtabmap map_assembler \
 		benchmark_evaluator depth_preprocessor exo_depth_preprocessor \
 		head_depth_preprocessor semantic_masker extrinsic_solver \
-		exo_pcl_publisher exo_imu_filter sequence_pair_adapter; do
+		exo_pcl_publisher exo_imu_filter sequence_pair_adapter ground_truth_adapter; do
 		pkill -TERM -f "__node:=${node}( |$)" 2>/dev/null || true
 	done
 	# Last resort for a node stuck in shutdown (for example a GPU callback).
-	for node in exo_color_tf exo_imu_tf head_color_tf gt_exo_tf gt_head_tf \
+	for node in exo_color_tf exo_imu_tf head_color_tf \
 		viz_ground_to_map_tf exo_rgbd_odometry exo_rtabmap map_assembler \
 		benchmark_evaluator depth_preprocessor exo_depth_preprocessor \
 		head_depth_preprocessor semantic_masker extrinsic_solver \
-		exo_pcl_publisher exo_imu_filter sequence_pair_adapter; do
+		exo_pcl_publisher exo_imu_filter sequence_pair_adapter ground_truth_adapter; do
 		pkill -KILL -f "__node:=${node}( |$)" 2>/dev/null || true
 	done
 	if [[ -n "${CLOUD_EVAL_BAG:-}" && "$OFFLINE_COMMAND_PRINTED" == false ]]; then
@@ -352,7 +342,7 @@ echo "RTAB-Map input: /camera/exo/color/image_raw + /exo/filtered/depth_raw"
 echo "Coupled single-camera sequence: $COUPLED_SEQUENCE_DATASET"
 echo "TUM trajectory evaluation: $TUM_GROUND_TRUTH"
 
-ros2 launch exo_head_slam main_pipeline_launch.py use_sim_time:=true publish_debug_pcl:="$PUBLISH_DEBUG_PCL" metrics_csv_path:="$METRICS_CSV" benchmark_output_prefix:="$BENCHMARK_OUTPUT_PREFIX" sliding_window_size:="$SLIDING_WINDOW_SIZE" exo_pitch_deg:="$EXO_PITCH_DEG" head_pitch_deg:="$HEAD_PITCH_DEG" use_imu:="$USE_IMU" imu_topic:=/camera/exo/imu exoskeleton_dataset:="$EXOSKELETON_DATASET" coupled_sequence_dataset:="$COUPLED_SEQUENCE_DATASET" tum_ground_truth:="$TUM_GROUND_TRUTH" "${GT_LAUNCH_ARGS[@]}" &
+ros2 launch exo_head_slam main_pipeline_launch.py use_sim_time:=true publish_debug_pcl:="$PUBLISH_DEBUG_PCL" metrics_csv_path:="$METRICS_CSV" benchmark_output_prefix:="$BENCHMARK_OUTPUT_PREFIX" sliding_window_size:="$SLIDING_WINDOW_SIZE" use_imu:="$USE_IMU" imu_topic:=/camera/exo/imu exoskeleton_dataset:="$EXOSKELETON_DATASET" coupled_sequence_dataset:="$COUPLED_SEQUENCE_DATASET" tum_ground_truth:="$TUM_GROUND_TRUTH" "${GT_LAUNCH_ARGS[@]}" &
 PIPELINE_PID=$!
 
 if ! wait_for_pipeline; then
@@ -364,18 +354,22 @@ if [[ "$RECORD_CLOUD_MAP" == true ]]; then
 	GROUND_TRUTH_ODOM_TOPIC=/exoskeleton/odom
 	GROUND_TRUTH_CLOUD_IS_LOCAL=false
 	GROUND_TRUTH_IS_CAMERA_POSE=false
+	GROUND_TRUTH_IS_EXO_POSE=true
 	if [[ "$TUM_GROUND_TRUTH" == true ]]; then
 		GROUND_TRUTH_ODOM_TOPIC=/ground_truth/odom
 		GROUND_TRUTH_CLOUD_IS_LOCAL=true
 		GROUND_TRUTH_IS_CAMERA_POSE=true
+		GROUND_TRUTH_IS_EXO_POSE=false
+	else
+		GROUND_TRUTH_ODOM_TOPIC=/ground_truth/exo_odom
 	fi
 	ros2 bag record -s mcap -o "$CLOUD_EVAL_BAG" --disable-keyboard-controls \
-		--custom-data "exo_pitch_deg=$EXO_PITCH_DEG" \
-			"dataset_numbers=$DATASET_NUMBERS" \
+		--custom-data "dataset_name=$BAG_NAME" \
 			"sliding_window_size=$SLIDING_WINDOW_SIZE" \
 			"ground_truth_odom_topic=$GROUND_TRUTH_ODOM_TOPIC" \
 			"ground_truth_cloud_is_local=$GROUND_TRUTH_CLOUD_IS_LOCAL" \
-			"ground_truth_is_camera_pose=$GROUND_TRUTH_IS_CAMERA_POSE" --topics \
+			"ground_truth_is_camera_pose=$GROUND_TRUTH_IS_CAMERA_POSE" \
+			"ground_truth_is_exo_pose=$GROUND_TRUTH_IS_EXO_POSE" --topics \
 		/vggt/combined_pointcloud /ground_truth/visible_cloud \
 		"$GROUND_TRUTH_ODOM_TOPIC" &
 	CLOUD_RECORD_PID=$!
@@ -385,8 +379,9 @@ fi
 echo "Starting bag playback: $BAG_PATH"
 PLAY_REMAP=()
 if [[ "$EXOSKELETON_DATASET" == true ]]; then
-	# Avoid duplicate parents; the launch file republishes only the camera transforms it needs.
-	PLAY_REMAP=(--remap /tf_static:=/recorded/tf_static)
+	# Keep dynamic camera GT isolated from the live TF tree and evaluation-only.
+	PLAY_REMAP=(--remap /tf_static:=/ground_truth/tf_static \
+		/tf:=/ground_truth/tf)
 fi
 PLAY_ARGS=("$BAG_PATH" --rate "$PLAYBACK_RATE" --disable-keyboard-controls --clock)
 if [[ "$LOOP_PLAYBACK" == true ]]; then

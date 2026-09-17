@@ -33,8 +33,8 @@ shopt -s globstar nullglob
 DATASETS=()
 for metadata in data/**/metadata.yaml; do
 	bag="${metadata%/metadata.yaml}"
-	#grep -Eq 'name: /(ground_truth/odom|exoskeleton/odom)' "$metadata" && DATASETS+=("$bag")
-	grep -Eq 'name: /(ground_truth/odom)' "$metadata" && DATASETS+=("$bag")
+	grep -Eq 'name: /(ground_truth/odom|exoskeleton/odom)' "$metadata" \
+		&& DATASETS+=("$bag")
 done
 (( ${#DATASETS[@]} > 0 )) || { echo "No ground-truth datasets found." >&2; exit 1; }
 

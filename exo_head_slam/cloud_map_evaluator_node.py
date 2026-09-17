@@ -74,6 +74,7 @@ class CloudMapEvaluatorNode(Node):
         self.declare_parameter('waist_to_exo_pitch_deg', 0.0)
         self.declare_parameter('ground_truth_cloud_is_local', False)
         self.declare_parameter('ground_truth_is_camera_pose', False)
+        self.declare_parameter('ground_truth_is_exo_pose', False)
         self.declare_parameter('global', True)
 
         self.metrics_csv_path = self.get_parameter('metrics_csv_path').value
@@ -89,6 +90,9 @@ class CloudMapEvaluatorNode(Node):
         self.global_mode = global_flag or self.get_parameter('global').value
         self.ground_truth_cloud_is_local = bool(
             self.get_parameter('ground_truth_cloud_is_local').value
+        )
+        self.ground_truth_is_exo_pose = bool(
+            self.get_parameter('ground_truth_is_exo_pose').value
         )
         self.estimated_voxels = {}
         self.ground_truth_voxels = {}
@@ -141,9 +145,11 @@ class CloudMapEvaluatorNode(Node):
             [pose.position.x, pose.position.y, pose.position.z],
             [pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w],
         )
-        world_from_exo = world_from_pose @ (
-            self.optical_from_exo if self.optical_from_exo is not None
-            else self.waist_to_exo
+        world_from_exo = world_from_pose if self.ground_truth_is_exo_pose else (
+            world_from_pose @ (
+                self.optical_from_exo if self.optical_from_exo is not None
+                else self.waist_to_exo
+            )
         )
         estimated = self.points(vggt_msg)
         estimated = estimated[np.isfinite(estimated).all(axis=1)]

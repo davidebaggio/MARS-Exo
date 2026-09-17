@@ -51,6 +51,7 @@ Core nodes:
 | `semantic_masker` | `exo_head_slam/semantic_masker_node.py` | Removes configured dynamic classes from RGB-D frames |
 | `extrinsic_solver` | `exo_head_slam/extrinsic_solver_node.py` | Loads VGGT-Omega, estimates `exo_link -> head_link`, publishes combined depth and point clouds |
 | `pointcloud_publisher` | `exo_head_slam/pointcloud_publisher_node.py` | Optional debug `PointCloud2` output from combined depth |
+| `ground_truth_adapter` | `exo_head_slam/ground_truth_adapter_node.py` | Composes time-varying camera GT for evaluation only |
 
 Important files:
 
@@ -158,22 +159,23 @@ evaluations and generate reports:
 
 It skips datasets without ground truth, writes every result under
 `metrics/final_evals/`, and leaves existing `metrics/pipeline/` and `metrics/eval/`
-results untouched. Pipeline playback defaults to `0.1x`; use `--rate RATE` to
+results untouched. Pipeline playback defaults to `0.2x`; use `--rate RATE` to
 change it. Offline cloud evaluation remains at `3.0x`.
 
-`run.sh` builds the package, sources the workspace, fixes Python shebangs, waits for the VGGT subscriptions to be ready, starts `/clock` playback, writes metrics under `metrics/pipeline/`, and opens `rviz/pipeline.rviz`. Metrics use `metrics_X_Y_W_Z`, where `X_Y_W` is the numeric dataset suffix and `Z` is `sliding_window_size`; rerunning the same configuration replaces its outputs. When visible-cloud ground truth is present, it records the VGGT cloud, ground-truth cloud, and odometry without evaluating them live. On shutdown it prints the `cloud_map_evaluation_launch.py` command that computes the CSV offline.
+`run.sh` builds the package, sources the workspace, fixes Python shebangs, waits for the VGGT subscriptions to be ready, starts `/clock` playback, writes metrics under `metrics/pipeline/`, and opens `rviz/pipeline.rviz`. Metrics use the bag name plus `sliding_window_size`; rerunning the same configuration replaces its outputs. When visible-cloud ground truth is present, it records the VGGT cloud, ground-truth cloud, and composed exo-camera odometry without evaluating them live. On shutdown it runs the offline cloud evaluation.
 
-When the bag contains `/ground_truth/global_map`, `run.sh` automatically enables
-the simulated exoskeleton dataset profile: metric `32FC1` depth, isolated GT TF
-topics, one-shot playback, extrinsic GT metrics, and trajectory/map evaluation.
+When the bag contains `/exoskeleton/odom`, `run.sh` isolates the recorded
+`/tf` and `/tf_static` as evaluation-only topics. Camera poses and the dynamic
+exo-to-head GT transform are composed from the bag at each timestamp; camera
+pitches are never parsed from filenames or supplied to VGGT.
 Benchmark JSON and paired trajectory CSV files are written under `metrics/eval/`.
 Trajectory metrics use RTAB-Map's final optimized `mapData` graph and node
 timestamps; raw visual odometry is reported separately as `odometry`.
 Timestamp gaps split RPE segments and are excluded from `duration_s`
 (`elapsed_span_s` still reports wall-clock span).
-RViz also shows `/ground_truth/global_map` in green, aligned to the estimated
-map at the first GT camera pose. GT odometry and a conflict-free `gt_*` TF tree
-are enabled; visible cloud/map displays are available disabled.
+RViz omits the recorded robot joint tree. Ground-truth visible cloud/map
+displays remain available, while VGGT continues to predict `exo_link ->
+head_link` online from RGB-D only.
 
 ## Topics
 
